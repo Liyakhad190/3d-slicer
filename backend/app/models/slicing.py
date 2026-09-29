@@ -144,7 +144,14 @@ class SliceJob(Base, TimestampMixin):
     error_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
     cancel_requested: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
-    input_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    #: Hash over every input, including profile versions, so a re-run with the
+    #: same inputs is idempotent and a profile change cannot reuse a stale
+    #: result. Empty until the pipeline resolves a configuration: the job row is
+    #: created before any configuration exists, and a placeholder that pretends
+    #: to be a fingerprint would be worse than an honest blank.
+    input_fingerprint: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="", index=True
+    )
 
     queued_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False, default=utcnow, index=True)
     started_at: Mapped[datetime | None] = mapped_column(TZDateTime, nullable=True)

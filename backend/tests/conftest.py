@@ -56,9 +56,9 @@ def test_client(test_data_dir: Path) -> Iterator:
     reset_settings_cache()
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def client(test_client):
-    """Function-scoped alias so tests read naturally."""
+    """Session-scoped alias so module-scoped fixtures can depend on it."""
     return test_client
 
 

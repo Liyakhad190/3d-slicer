@@ -20,7 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app.api.routers import auth, catalog, health, models
+from app.api.routers import auth, catalog, health, models, slicing
 from app.core.config import get_settings
 from app.core.errors import AppError
 from app.core.logging import get_logger
@@ -144,6 +144,7 @@ def create_app() -> FastAPI:
     app.include_router(auth.router, prefix=prefix)
     app.include_router(models.router, prefix=prefix)
     app.include_router(catalog.router, prefix=prefix)
+    app.include_router(slicing.router, prefix=prefix)
 
     @app.get("/", include_in_schema=False)
     def root() -> dict[str, Any]:

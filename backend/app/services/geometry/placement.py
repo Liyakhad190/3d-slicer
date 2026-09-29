@@ -67,7 +67,7 @@ def prepare_mesh(
     build_volume: tuple[float, float, float],
     output_path: Path,
     allow_scale: bool = False,
-    scale_to_fit: float = 0.98,
+    file_type: str = "stl",
 ) -> PlacementResult:
     """Place a mesh on the build plate and write a prepared copy.
 
@@ -150,7 +150,9 @@ def prepare_mesh(
             )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    placed.export(output_path)
+    # Export with an explicit type: content-addressed inputs arrive without an
+    # extension, and trimesh's exporter selection is driven by the extension.
+    placed.export(output_path, file_type=file_type)
 
     notes.append(
         "Prepared pose: centred on the build origin in X and Y, bottom face on "
@@ -185,9 +187,17 @@ def prepare_file(
     build_volume: tuple[float, float, float],
     output_path: Path,
     allow_scale: bool = False,
+    file_type: str | None = None,
 ) -> PlacementResult:
-    """Load, place and write a prepared copy of a model file."""
-    mesh = trimesh.load(str(source), force="mesh", process=False)
+    """Load, place and write a prepared copy of a model file.
+
+    `file_type` must be supplied for stored blobs. Blobs are content-addressed
+    and therefore have no extension, so trimesh cannot infer the format from
+    the path and raises "File type: ... not supported" without it.
+    """
+    if file_type is None:
+        file_type = source.suffix.lstrip(".").lower() or None
+    mesh = trimesh.load(str(source), force="mesh", process=False, file_type=file_type)
     if isinstance(mesh, trimesh.Scene):
         meshes = [g for g in mesh.geometry.values() if isinstance(g, trimesh.Trimesh)]
         if not meshes:
@@ -200,6 +210,7 @@ def prepare_file(
         build_volume=build_volume,
         output_path=output_path,
         allow_scale=allow_scale,
+        file_type=file_type or "stl",
     )
 
 

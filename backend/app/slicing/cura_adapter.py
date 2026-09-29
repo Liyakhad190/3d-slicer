@@ -66,6 +66,9 @@ class SliceRequest:
     output_path: Path
     settings: Mapping[str, Any]
     job_label: str = ""
+    #: Format of the model file. Required for content-addressed blobs, which
+    #: have no extension for trimesh to infer from.
+    model_format: str | None = None
 
 
 @dataclass(frozen=True)
@@ -344,16 +347,20 @@ class CuraEngineAdapter:
 
         request.output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Prepare the mesh: placed on the plate, original untouched.
+        # Prepare the mesh: placed on the plate, original untouched. The
+        # prepared file keeps a real extension because trimesh selects its
+        # exporter from the extension, and the content-addressed input has none.
         from app.services.geometry.placement import prepare_file
 
         build_volume = self._build_volume_from_settings(request.settings)
-        prepared = request.output_path.with_name(f"prepared-{request.model_path.name}")
+        extension = (request.model_format or "stl").lower()
+        prepared = request.output_path.with_name(f"prepared.{extension}")
         placement = prepare_file(
             request.model_path,
             build_volume=build_volume,
             output_path=prepared,
             allow_scale=False,
+            file_type=request.model_format,
         )
 
         merged, dropped = self._merge_with_schema(request.settings)

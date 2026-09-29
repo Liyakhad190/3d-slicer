@@ -170,6 +170,12 @@ class MachineProfile(Base):
     )
 
     machine: Mapped[Machine] = relationship(back_populates="profiles")
+    #: The dialect drives the validator's command whitelist. Loaded eagerly when
+    #: a profile is fetched for slicing so the validator never has to guess the
+    #: firmware's vocabulary.
+    gcode_dialect: Mapped["GcodeDialect | None"] = relationship(
+        "GcodeDialect", lazy="joined"
+    )
 
 
 class Nozzle(Base, TimestampMixin):
