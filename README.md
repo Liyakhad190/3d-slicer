@@ -127,16 +127,34 @@ temperature, mechanical wear, belt tension, nozzle condition and the machine's
 current state. The product says so in the footer rather than promising a perfect
 print.
 
+## Print fidelity
+
+Parameter fidelity is verified by measurement, not by reading setting
+names. CuraEngine exposes *derived* settings that only its GUI computes;
+the headless engine accepts them, reports no error, and prints the
+default. An earlier version of this platform sent several of them, so a
+requested 20% infill silently printed at the default. Each is now mapped
+to a *primitive* setting, and `tests/test_print_fidelity.py` proves the
+mapping by slicing nine calibration models and measuring the deposited
+geometry from the G-code.
+
+Three tiers are kept separate and never conflated:
+
+| Tier | Meaning |
+| --- | --- |
+| `requested` | what `PrintConfiguration` asked for |
+| `generated` | what the engine's settings file actually contained |
+| `measured` | what the G-code can be shown to deposit |
+
+A `measured` value is a property of a toolpath, not of a part. Every
+report carries `physical_validation_required: true`.
+
 ## Known open gaps
 
-* **Wall-count and infill-density fidelity is unverified.** The toolpath is
-  correct in extent, height and bed position, and passes validation, but the
-  extruded volume is lower than a hand calculation for the requested
-  `wall_line_count` predicts. The mapping likely involves Cura's
-  `skin_outline_count` and per-extruder scoping. Measure a caliper coupon
-  before trusting it. Tracked in `SLICER_ADAPTER_SPEC.md` §6.
-* STEP/STP and IGES are recognised but not converted; a CAD kernel (OpenCascade)
-  worker is required. The format matrix reports this rather than claiming
-  support.
-* Only the regression fixtures have been sliced end to end. No organic or
-  multi-part model has been validated.
+* STEP/STP and IGES are recognised but not converted; a CAD kernel
+  (OpenCascade) worker is required. The format matrix reports this rather
+  than claiming support.
+* Only the regression and calibration fixtures have been sliced end to end.
+  No organic or multi-part model has been validated.
+* The pipeline still runs inline in the request; job rows exist but there
+  is no worker process yet.

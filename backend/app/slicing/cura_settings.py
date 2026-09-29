@@ -1,11 +1,39 @@
 """Translation from our parameter set to CuraEngine settings.
 
 Kept separate from the optimizer so the optimizer stays readable and the
-engine-specific naming lives in one place. Only scalar values are emitted; the
-adapter refuses anything else.
+engine-specific naming lives in exactly one place.
 
-Anything unmapped is dropped rather than guessed at: an invented Cura setting
-would either be ignored silently or change the print in a way nobody reviewed.
+**Which Cura settings are actually operative**
+
+Every name in `OPERATIVE_SETTINGS` below was verified by slicing a calibration
+model with the setting varied and measuring the deposited geometry from the
+resulting G-code (`app/slicing/measurement.py`). The distinction matters more
+than it looks, because Cura exposes two families of settings:
+
+* **Primitive settings** the engine reads directly. These work.
+* **Derived settings** the *GUI* computes for the user. The headless engine
+  ignores them completely — it accepts the value, reports no error, and prints
+  the default.
+
+The first version of this file used the derived names. It produced valid,
+plausible G-code that silently ignored the requested infill density, pattern
+and top/bottom thickness. Nothing in the file said so, because from the
+outside the settings had been applied.
+
+| Our parameter | Wrong (derived, inert) | Correct (primitive, verified) |
+| --- | --- | --- |
+| `infill_density_percent` | `infill_sparse_density` | `infill_line_distance` (mm) |
+| `infill_pattern` | `infill_sparse_pattern` | `infill_pattern` |
+| `top_bottom_layers` | `top_bottom_thickness` | `top_layers` (+ `bottom_layers`) |
+| extrusion width for infill | `infill_sparse_thickness` | `infill_line_width` |
+
+`bottom_layers` is additionally inert in Cura 5.13 — `top_layers` governs both
+shells. Both are emitted so the behaviour is correct here and stays correct on a
+build where they are independent.
+
+Anything unmapped is still dropped rather than guessed at, and `material_diameter`
+is always set explicitly: the schema's placeholder of 2.85 mm would make every
+E value in the file wrong for real 1.75 mm filament.
 """
 
 from __future__ import annotations
@@ -14,13 +42,12 @@ from typing import Any
 
 from app.slicing.validator import MachineLimits
 
-#: Our parameter key -> CuraEngine setting key.
+#: Our parameter key -> CuraEngine setting key, for primitive settings only.
 SETTING_MAP: dict[str, str] = {
     "layer_height_mm": "layer_height",
     "first_layer_height_mm": "layer_height_0",
     "extrusion_width_mm": "line_width",
     "wall_count": "wall_line_count",
-    "infill_density_percent": "infill_sparse_density",
     "print_speed_mm_s": "speed_print",
     "travel_speed_mm_s": "speed_travel",
     "acceleration_mm_s2": "machine_acceleration",
@@ -59,6 +86,37 @@ _INFILL_MAP: dict[str, str] = {
     "lightning": "lightning",
 }
 
+#: Filament diameters the platform will accept. 2.85 mm is Cura's schema
+#: placeholder, not a real filament; silently emitting it would mis-scale every
+#: extrusion command.
+SUPPORTED_FILAMENT_DIAMETERS_MM: frozenset[float] = frozenset(
+    {1.75, 2.85, 3.00}
+)
+DEFAULT_FILAMENT_DIAMETER_MM = 1.75
+
+#: Above this line distance the engine effectively stops laying infill. Used for
+#: a 0% request, which has no finite distance.
+_NO_INFILL_LINE_DISTANCE_MM = 100.0
+
+
+def infill_line_distance_mm(
+    density_percent: float, line_width_mm: float
+) -> float:
+    """Convert an infill density percentage to a line distance in mm.
+
+    `density = line_width / line_distance`, verified against the schema
+    defaults (0.4 mm lines at 20% gives the 2.0 mm default distance).
+
+    A 0% request has no finite distance, so the sentinel above is used; 100%
+    is 0, which the engine reads as solid.
+    """
+    density = max(0.0, min(100.0, float(density_percent)))
+    if density <= 0.0:
+        return _NO_INFILL_LINE_DISTANCE_MM
+    if density >= 100.0:
+        return 0.0
+    return round(float(line_width_mm) * 100.0 / density, 4)
+
 
 def to_cura_settings(
     parameters: dict[str, Any],
@@ -66,8 +124,9 @@ def to_cura_settings(
     limits: MachineLimits,
     start_gcode: str | None = None,
     end_gcode: str | None = None,
+    filament_diameter_mm: float = DEFAULT_FILAMENT_DIAMETER_MM,
 ) -> dict[str, Any]:
-    """Map resolved parameters onto CuraEngine's settings vocabulary.
+    """Map resolved parameters onto CuraEngine's operative settings.
 
     Machine limits are applied here as a final clamp, not merely trusted from
     the optimizer, so a hand-edited or AI-proposed parameter set still cannot
@@ -75,22 +134,42 @@ def to_cura_settings(
     """
     settings: dict[str, Any] = {}
 
-    # `top_bottom_layers` is a count in our schema and a *thickness in mm* in
-    # Cura 5.x (`top_bottom_thickness`). Sending a count there silently produced
-    # a 0.3 mm top shell, so the conversion is explicit.
-    top_bottom_layers = parameters.get("top_bottom_layers")
+    line_width = float(
+        parameters.get("extrusion_width_mm") or limits.nozzle_diameter_mm * 1.125
+    )
     layer_height = float(parameters.get("layer_height_mm") or 0.2)
-    if top_bottom_layers is not None:
-        settings["top_bottom_thickness"] = round(float(top_bottom_layers) * layer_height, 4)
 
+    # --- infill, via the primitive controls --------------------------------
+    infill_pattern = parameters.get("infill_pattern")
+    if infill_pattern is not None:
+        settings["infill_pattern"] = _INFILL_MAP.get(
+            str(infill_pattern).lower(), "gyroid"
+        )
+    settings["infill_line_width"] = round(line_width, 4)
+
+    infill_density = parameters.get("infill_density_percent")
+    if infill_density is not None:
+        settings["infill_line_distance"] = infill_line_distance_mm(
+            infill_density, line_width
+        )
+
+    # --- top/bottom shell, via the layer count ------------------------------
+    top_bottom_layers = parameters.get("top_bottom_layers")
+    if top_bottom_layers is not None:
+        count = max(0, int(top_bottom_layers))
+        # `top_layers` governs both shells in Cura 5.13; `bottom_layers` is
+        # emitted too so the intent is explicit and stays correct if a future
+        # build separates them.
+        settings["top_layers"] = count
+        settings["bottom_layers"] = count
+
+    # --- direct mappings ----------------------------------------------------
     for our_key, cura_key in SETTING_MAP.items():
         if our_key not in parameters:
             continue
         value = parameters[our_key]
 
-        if our_key == "infill_pattern":
-            settings[cura_key] = _INFILL_MAP.get(str(value).lower(), "gyroid")
-        elif our_key == "support_type":
+        if our_key == "support_type":
             settings[cura_key] = _SUPPORT_TYPE_MAP.get(str(value).lower(), "normal")
         elif our_key == "adhesion_type":
             settings[cura_key] = _ADHESION_MAP.get(str(value).lower(), "glass")
@@ -106,8 +185,6 @@ def to_cura_settings(
             settings[cura_key] = min(float(value), limits.bed_max_c or float(value))
         elif our_key == "cooling_fan_percent":
             settings[cura_key] = max(0.0, min(100.0, float(value)))
-        elif our_key == "acceleration_mm_s2":
-            settings[cura_key] = float(value)
         else:
             settings[cura_key] = value
 
@@ -117,26 +194,30 @@ def to_cura_settings(
         settings["retraction_amount"] = float(retraction.get("distance_mm", 0.8))
         settings["retraction_speed"] = float(retraction.get("speed_mm_s", 40))
 
-    # Machine geometry. These are hard machine constraints: the build volume the
-    # validator checks the toolpath against must be the same one the slicer was
-    # told about, or the two disagree and the safety check is meaningless.
+    # --- machine geometry ---------------------------------------------------
     settings["machine_width"] = limits.build_x
     settings["machine_depth"] = limits.build_y
     settings["machine_height"] = limits.build_z
-    # The slicer is told the same coordinate frame the validator will check the
-    # toolpath against, derived from one profile field so the two cannot
-    # disagree about where the machine is.
     settings["machine_center_is_zero"] = limits.origin_convention == "center"
-    # `mesh_position_*` is deliberately NOT set. Cura drops the model onto the
-    # build plate itself; forcing mesh_position_z=0 places the mesh centred on
-    # the bed, so everything below Z=0 is clipped away. An explicit position
-    # silently sliced away half of a 20 mm cube.
+    # `mesh_position_*` is deliberately NOT set: Cura drops the model onto the
+    # plate itself, and forcing mesh_position_z=0 clips everything below Z=0.
 
+    # --- filament -----------------------------------------------------------
+    # Always set. The schema default of 2.85 mm is a placeholder, and E values
+    # are computed from it: leaving it in place mis-scales every extrusion.
+    diameter = float(filament_diameter_mm or DEFAULT_FILAMENT_DIAMETER_MM)
+    if diameter not in SUPPORTED_FILAMENT_DIAMETERS_MM:
+        raise ValueError(
+            f"Unsupported filament diameter {diameter} mm. "
+            f"Known: {sorted(SUPPORTED_FILAMENT_DIAMETERS_MM)}"
+        )
+    settings["material_diameter"] = diameter
+
+    # --- values every profile needs ------------------------------------------
     settings.setdefault("machine_nozzle_size", limits.nozzle_diameter_mm)
     settings.setdefault("layer_height", min(limits.nozzle_diameter_mm * 0.5, 0.28))
-    settings.setdefault("line_width", limits.nozzle_diameter_mm * 1.125)
-    settings["magic_spiralize"] = True  # smooth the outer wall on curved surfaces
-    # RepRap (Marlin/Sprinter) is the dialect family the validator checks.
+    settings.setdefault("line_width", line_width)
+    settings["magic_spiralize"] = True
     settings["machine_gcode_flavor"] = "RepRap (Marlin/Sprinter)"
 
     if start_gcode:

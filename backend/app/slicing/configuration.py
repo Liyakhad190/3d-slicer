@@ -55,6 +55,10 @@ class PrintConfiguration:
     material_profile_id: str
     machine_name: str
     material_name: str
+    #: Filament diameter in mm. Carried on the configuration rather than looked
+    #: up by the adapter: the slicer derives every E value from it, so an
+    #: adapter that guessed would mis-scale every extrusion command.
+    filament_diameter_mm: float = 1.75
     start_gcode: str | None = None
     end_gcode: str | None = None
     source_fingerprint: str = ""
@@ -81,6 +85,7 @@ class PrintConfiguration:
             "material_profile_id": self.material_profile_id,
             "machine_name": self.machine_name,
             "material_name": self.material_name,
+            "filament_diameter_mm": self.filament_diameter_mm,
             "build_volume_mm": {
                 "x": self.limits.build_x,
                 "y": self.limits.build_y,
@@ -101,6 +106,7 @@ class PrintConfiguration:
             "nozzle": self.nozzle.to_dict(),
             "machine_profile_id": self.machine_profile_id,
             "material_profile_id": self.material_profile_id,
+            "filament_diameter_mm": self.filament_diameter_mm,
             "start_gcode": self.start_gcode,
             "end_gcode": self.end_gcode,
         }
@@ -153,9 +159,11 @@ def from_profiles(
 
     machine = machine_profile.machine
     material = material_profile.material
-    dialect = getattr(machine_profile, "gcode_dialect", None)
 
     limits = _Limits.from_profile(machine_profile, nozzle_diameter_mm=nozzle_diameter_mm)
+
+    diameter = getattr(material_profile, "material_diameter", None)
+    filament_diameter = float(diameter) if diameter else 1.75
 
     return PrintConfiguration(
         technology=str(machine.technology.value if hasattr(machine.technology, "value") else machine.technology),
@@ -170,6 +178,7 @@ def from_profiles(
         material_profile_id=str(material_profile.id),
         machine_name=f"{machine.vendor} {machine.model}",
         material_name=material.display_name,
+        filament_diameter_mm=filament_diameter,
         start_gcode=machine_profile.start_gcode,
         end_gcode=machine_profile.end_gcode,
         warnings=tuple(warnings or ()),

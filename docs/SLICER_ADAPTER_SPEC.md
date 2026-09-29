@@ -160,20 +160,39 @@ break the adapter. Keys the schema does not define are dropped and logged.
 
 Cura 5.13 renamed much of its motion and shell vocabulary. Current names:
 
-| Our parameter | Cura 5.13 |
-| --- | --- |
-| layer height | `layer_height` (first layer `layer_height_0`) |
-| extrusion width | `line_width` |
-| wall count | `wall_line_count` |
-| top/bottom layers | `top_bottom_thickness` (**millimetres**, converted from a count) |
-| print speed | `speed_print` (not `print_speed`) |
-| travel speed | `speed_travel` |
-| acceleration | `machine_acceleration` / `acceleration_print` |
-| nozzle temperature | `material_print_temperature` |
-| bed temperature | `material_bed_temperature` |
-| part cooling | `cool_fan_speed` (not `material_print_fan_speed`) |
-| start / end G-code | `machine_start_gcode` / `machine_end_gcode` |
-| dialect | `machine_gcode_flavor` |
+Cura exposes two families of settings and the difference is invisible from the
+outside: **primitive** settings the engine reads, and **derived** settings the
+*GUI* computes. The headless engine accepts a derived setting, reports no
+error, and prints the default. Every name in the table below was verified by
+slicing with the setting varied and measuring the deposited geometry from the
+resulting G-code.
+
+| Our parameter | Wrong (derived, inert) | Correct (primitive, verified) |
+| --- | --- | --- |
+| layer height | — | `layer_height` (first layer `layer_height_0`) |
+| extrusion width | — | `line_width` |
+| wall count | — | `wall_line_count` |
+| top/bottom layers | `top_bottom_thickness` | `top_layers` + `bottom_layers` |
+| infill density | `infill_sparse_density` | `infill_line_distance` (mm) |
+| infill pattern | `infill_sparse_pattern` | `infill_pattern` |
+| infill line width | `infill_sparse_thickness` | `infill_line_width` |
+| print speed | `print_speed` | `speed_print` |
+| travel speed | `travel_speed` | `speed_travel` |
+| acceleration | `max_acceleration` | `machine_acceleration` / `acceleration_print` |
+| nozzle temperature | — | `material_print_temperature` |
+| bed temperature | — | `material_bed_temperature` |
+| part cooling | `material_print_fan_speed` | `cool_fan_speed` |
+| start / end G-code | `start_gcode` | `machine_start_gcode` / `machine_end_gcode` |
+| dialect | `gcode_flavor` | `machine_gcode_flavor` |
+
+Density converts to distance as `distance = line_width * 100 / density`
+percentage, verified against the schema defaults (0.4 mm lines at 20% gives the
+2.0 mm default `infill_line_distance`). 100% is `0` (solid); 0% uses a large
+sentinel rather than dividing by zero.
+
+`bottom_layers` is additionally inert in Cura 5.13 — `top_layers` governs both
+shells. Both are emitted so the intent is explicit and remains correct on a
+build that separates them.
 
 ### Coordinate frame
 
@@ -187,15 +206,18 @@ the slicer settings and the validator read the same field:
 Getting this wrong is not cosmetic: it makes every out-of-bounds finding either
 absent or spurious.
 
-### Known gaps
+### Fidelity: resolved
 
-* **Wall-count and infill-density fidelity is unverified.** A 20 mm cube at
-  0.3 mm produces a correct 67-layer, full-height, on-bed toolpath that passes
-  validation, but the extruded volume is lower than a hand calculation for the
-  requested `wall_line_count` predicts. The mapping is suspected to involve
-  Cura's `skin_outline_count` and per-extruder scoping. **Do not assume wall
-  thickness is honoured** until measured against a caliper-printed coupon.
-  This is an open Phase 1 gap.
+The earlier "wall-count and infill-density fidelity is unverified" gap is
+**closed**. The cause was that the adapter sent derived settings the engine
+ignores; see the table above. `app/slicing/measurement.py` now measures the
+emitted toolpath, `app/slicing/fidelity.py` reports REQUESTED / GENERATED /
+MEASURED separately, and `tests/test_print_fidelity.py` slices nine calibration
+models and asserts each operative setting measurably changes the output.
+
+What remains true, and is not going away: these are measurements of *G-code*.
+Physical accuracy needs a printed coupon and an instrument, which is why every
+report carries `physical_validation_required: true`.
 * Cura's `;Filament used:` and `;MINX/MAXX:` header comments are unreliable
   without a full printer definition. The platform computes filament from the E
   axis instead (`stats["filament_extruded_mm"]`).

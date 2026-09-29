@@ -172,6 +172,9 @@ def _seed_materials(
                     bed_temp=profile["bed_temp"],
                     chamber_temp=profile.get("chamber_temp"),
                     glass_transition_c=profile.get("glass_transition_c"),
+                    material_diameter=Decimal(
+                        str(profile.get("material_diameter_mm", 1.75))
+                    ),
                     max_volumetric_flow_mm3s=Decimal(
                         str(profile.get("max_volumetric_flow_mm3s", 0)) or 0
                     ),

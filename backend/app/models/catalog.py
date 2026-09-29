@@ -255,6 +255,12 @@ class MaterialProfile(Base):
     bed_temp: Mapped[dict[str, Any]] = mapped_column(JSONType, nullable=False)
     chamber_temp: Mapped[dict[str, Any] | None] = mapped_column(JSONType, nullable=True)
     glass_transition_c: Mapped[float | None] = mapped_column(Float, nullable=True)
+    #: Filament diameter, mm. The slicer derives every E value from it, so this
+    #: is a correctness-critical field, not a cosmetic one. It must be the real
+    #: spool diameter; a placeholder mis-scales every extrusion command.
+    material_diameter: Mapped[float | None] = mapped_column(
+        Numeric(4, 2), nullable=True, default=Decimal("1.75")
+    )
     max_volumetric_flow_mm3s: Mapped[float | None] = mapped_column(Numeric(10, 3), nullable=True)
     retraction: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict, nullable=False)
     print_speed: Mapped[dict[str, Any]] = mapped_column(JSONType, nullable=False)

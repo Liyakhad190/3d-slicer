@@ -270,6 +270,9 @@ class CuraEngineAdapter:
             limits=configuration.limits,
             start_gcode=configuration.start_gcode,
             end_gcode=configuration.end_gcode,
+            filament_diameter_mm=getattr(
+                configuration, "filament_diameter_mm", 1.75
+            ),
         )
 
     def validate_output(self, output_path: Path) -> list[str]:

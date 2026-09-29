@@ -1,166 +1,166 @@
-# Architecture
+# ARCHITECTURE
 
-## 0. The one invariant everything else serves
+Phase 0 audit. This describes the repository as it actually is, including the
+defects the audit found. Nothing here is aspirational.
 
-> **The LLM may propose. Deterministic code disposes.**
+## 1. Current architecture
 
-No path exists by which model-generated text becomes a machine instruction. Every AI output
-is a *proposal record* (`ai_decisions`) carrying a reason, evidence references and a confidence
-value. A proposal is only accepted if a deterministic service re-derives the same fact from real
-geometry, real profile data or a real toolpath — or if a human explicitly overrides it, in which
-case the override is recorded with the machine-safety checks that were still applied.
+```
+frontend (React 18 + Vite + TS strict)
+  │  fetch /api/v1  (Vite dev proxy)
+  ▼
+api (FastAPI, sync handlers in a threadpool)
+  ├── auth/identity        argon2id, JWT, roles, rate limit, audit log
+  ├── models/assets        upload → sniff → content-addressed blob
+  ├── catalog              machine / material / nozzle knowledge base
+  └── slicing              POST /slice, jobs, validation, toolpath
+                              │
+                              ▼
+                         run_pipeline()            app/slicing/pipeline.py
+                              │
+   ┌──────────┬──────────┬───┴───────┬──────────┬──────────┐
+   ▼          ▼          ▼           ▼          ▼          ▼
+analyse   optimise   select      slice     validate   toolpath
+(trimesh) (optimizer)(registry) (adapter) (validator)(parser)
+                                          │
+                                          ▼
+                                    CuraEngine (subprocess, AGPL-3.0)
+```
 
-`app/intelligence/decision_gate.py` is the single chokepoint that enforces this. It is not a
-helper function; nothing else in the codebase is allowed to accept an AI proposal.
+### Data flow for one job
 
-### What is authoritative for what
+`POST /slice` runs synchronously and creates a `slice_job` first, so history
+survives a crash. Stages write `job_stage_runs` rows and `job_events`, and the
+UI reads progress from those rows — there is no progress value invented by the
+client.
 
-| Concern | Authority | Why |
+1. `models_service.run_analysis` → trimesh metrics, cached by content hash
+2. build-volume fit check (fails fast, before any engine time is spent)
+3. `ParameterOptimizer.optimise` → parameters + a reason per decision
+4. `configuration.from_profiles` → `PrintConfiguration`; **refuses unvalidated
+   machine profiles**
+5. `SlicerRegistry.select` → ranks engines by capability, refuses when none fit
+6. `CuraEngineAdapter.slice` → prepares the mesh, runs the binary
+7. `validate_gcode` → any `critical` finding blocks the download
+8. `parse_toolpath` → renderable segments
+
+## 2. Existing interfaces (do not break)
+
+| Interface | Location | Contract |
 | --- | --- | --- |
-| Geometry, volume, manifoldness, overhangs | `trimesh` + `manifold3d` (deterministic) | Numerical facts must be reproducible and auditable |
-| Machine limits, build volume, thermal envelope | Versioned `machine_profiles` | Safety. A wrong number here injures hardware or voids warranty |
-| Slicing / toolpath generation | `CuraEngine` subprocess (deterministic) | Slicing is a solved, validated algorithm; re-implementing it is a liability |
-| G-code safety | `app/slicing/validation/*` (deterministic) | Last gate before the machine |
-| Orientation *scoring*, parameter *proposals*, risk *explanations* | LLM + heuristics, **recorded and scored**, then gated | Judgement, not arithmetic |
-| Whether a risky proposal is *admissible* | Deterministic policy layer | Never delegated |
+| `PrintConfiguration` | `app/slicing/configuration.py` | Frozen dataclass; the only thing adapters see. `to_dict()`, `fingerprint()`, `require_runnable()` |
+| `MachineLimits` | `app/slicing/validator.py` | Build volume, thermal envelope, speed ceilings, `origin_convention`, `axis_bounds()` |
+| `SlicerEngineAdapter` | `app/slicing/cura_adapter.py` | Protocol: availability, probe, capabilities, `validate_configuration`, `prepare_configuration`, `slice`, `validate_output` |
+| `SlicerRegistry` | `app/slicing/registry.py` | `register()`, `candidates()`, `select()`, `describe()` |
+| `TechnologyRegistry` | `app/slicing/registry.py` | `get`, `require_supported`, `accepts_input`; unsupported technologies raise |
+| `ParameterOptimizer` | `app/slicing/optimizer.py` | `optimise(objective, geometry, locked)` → `OptimisationResult` with per-decision reasons |
+| `MeshAnalysisReport` | `app/services/geometry/analyzer.py` | Metrics + `Finding`s + score with a published breakdown |
+| `prepare_file` | `app/services/geometry/placement.py` | Canonical pose: bottom on plate, centred on the **origin** |
 
-## 1. Process topology
+### Extension points that already work
 
-```
-                        ┌──────────────────────────────┐
-  Browser  ──HTTPS──▶   │  api  (FastAPI, uvicorn)     │
-                        │  auth · uploads · queries    │
-                        │  SSE /job-events/{id}        │
-                        └───────┬──────────────┬───────┘
-                                │ SQLAlchemy   │ enqueue
-                                ▼              ▼
-                        ┌───────────────┐  ┌──────────────────┐
-                        │  PostgreSQL   │  │  job_queue       │
-                        │  (SQLite dev) │◀─┤ (DB lease queue) │
-                        └───────────────┘  └────────┬─────────┘
-                                ▲                   │
-                                │        ┌──────────┼──────────┬─────────────┐
-                                │        ▼          ▼          ▼             ▼
-                                │   geometry     slicing   simulation     ai
-                                │   worker       worker     worker       worker
-                                │        │          │          │             │
-                                │        └──────────┴────┬─────┴─────────────┘
-                                │                      │  writes gcode + report
-                                │                      ▼
-                                │             ┌──────────────────┐
-                                │             │ G-code Validator │
-                                │             │ (deterministic)  │
-                                │             └────────┬─────────┘
-                                │                      │ BLOCK or PASS
-                                ▼                      ▼
-                        ┌──────────────────────────────────────┐
-                        │  blob store (content-addressed)      │
-                        │  models/ blobs/jobs/ slices/ artifacts│
-                        └──────────────────────────────────────┘
-```
+* **New slicer engine** — one class implementing the protocol, one
+  `register()` call. No core change.
+* **New printer** — a `machines` + `machine_profiles` row. No code. This is
+  load-bearing: there is no `if printer == "Ender"` anywhere.
+* **New material** — a `materials` + `material_profiles` row.
+* **New technology** — a `TechnologySpec` in `registry.py` with
+  `supported=False` until an engine exists.
+* **New file format** — a `ModelFormat` + a case in `detect_format`, and the
+  capability matrix updates itself from data.
 
-Each worker is a separate OS process polling the queue with a **lease** (`FOR UPDATE SKIP LOCKED`
-on Postgres, a transactional claim on SQLite). A worker that dies releases its lease on timeout
-and the stage is retried. Stage execution is **idempotent** and keyed by input hashes, so a retry
-re-derives rather than duplicates.
+## 3. Phase 0 audit findings
 
-**Sandboxing.** The slicing worker is the only process allowed to spawn `CuraEngine`. It runs with
-a scrubbed environment, an explicit `cwd` inside a per-job temp dir, a wall-clock timeout, an
-output-size cap, and no network. Uploaded files are never executed — they are parsed by
-format-specific readers in a read-only mount.
+The audit read every module. The important results:
 
-## 2. Bounded contexts
+**Sound and worth preserving**
 
-| Context | Package | Owns |
-| --- | --- | --- |
-| identity | `app/identity` | users, tokens, roles, audit log |
-| assets | `app/assets` | uploaded models, versions, blob store, format sniffing |
-| geometry | `app/geometry` | analysis, repair, orientation, support *strategy* (not support geometry) |
-| catalog | `app/catalog` | machine profiles, material profiles, nozzle profiles, versions |
-| slicing | `app/slicing` | parameter resolution, engine adapters, toolpath, gcode validation, simulation |
-| jobs | `app/jobs` | queue, state machine, progress, events |
-| intelligence | `app/intelligence` | LLM provider, agent tool surface, decision gate, risk narrative |
+* The AI/deterministic boundary holds: the optimizer, not a model, produces
+  parameters; a blocked configuration cannot reach an adapter.
+* Profile versioning is real — jobs store exact `*_profile_id` values.
+* The download guard is a single indexed predicate (`generated_files.is_blocked`).
+* Content-sniffed upload with a structural binary-STL check, zip-bomb guard and
+  path-free blob keys.
+* Strict TS and typed Python throughout; the strict flags have caught real bugs.
 
-Contexts communicate through service functions and DB rows, never by reaching into each other's
-internals. `app/adapters` holds ports (Protocols) and their implementations.
+**Defects found**
 
-## 3. The job state machine
+| # | Defect | Severity | Status |
+| --- | --- | --- | --- |
+| D1 | `infill_sparse_density`, `infill_sparse_pattern`, `infill_sparse_thickness`, `top_bottom_thickness`, `wall_thickness`, `skin_outline_count` are **GUI-derived settings the headless engine ignores** | **Critical** | **Fixed in Phase A**, with a measurement test per setting |
+| D2 | `material_diameter` left at the schema placeholder (2.85 mm) | **Investigated: not a defect** | Set explicitly anyway |
+| D3 | `bottom_layers` is inert in Cura 5.13; `top_layers` governs both shells | Medium | **Fixed in Phase A** |
+| D4 | `total_extruded_length_mm` is *path length*, but the name reads like *filament length*; the two differ ~10x | Medium | **Fixed in Phase A** (split into `extruded_path_length_mm` / `filament_mm`) |
+| D5 | `POST /slice` runs the whole pipeline in the request | Medium | Open: job rows exist, execution is inline |
+| D6 | No mesh validator separate from the analyzer; no repair at all | Medium | Phases B/C |
+| D7 | `slice_parameters` / `parameter_set` tables exist but optimizer decisions are not persisted to them | Medium | Open |
+| D8 | `dialect` local in `from_profiles` is assigned and unused | Trivial | Open |
+| D9 | No worker process; `job_worker_enabled` / lease columns are unused | Medium | Open |
 
-```
-QUEUED ─▶ ANALYZING ─▶ REPAIRING ─▶ OPTIMIZING ─▶ SLICING ─▶ VALIDATING ─▶ SIMULATING ─▶ COMPLETED
-   │           │            │            │            │            │             │
-   └───────────┴────────────┴────────────┴────────────┴────────────┴─────────────┴──▶ FAILED
-                                                                                                 
-any state ──(policy says it must not reach a machine)──▶ BLOCKED
-```
+**D1 was the cause of the fidelity gap.** It is answered, not open. The
+requested infill density, pattern and top/bottom thickness were being sent,
+accepted, and discarded. Each is now translated to a *primitive* setting the
+engine actually reads, and each translation has a test that slices with the
+setting varied and measures the deposited geometry from the G-code.
 
-Transitions are validated by a single table in `app/jobs/state_machine.py`; an illegal transition
-raises rather than silently corrupting job history. `BLOCKED` is a first-class terminal state:
-a print that fails validation must never be presentable as "ready to print", and `GET
-/generated-files` refuses to serve a `BLOCKED` job's artifacts.
+**D2 was investigated and found not to be a defect.** CuraEngine 5.13 emits
+identical E values for `material_diameter` of 1.75, 2.85 and unset (verified:
+E sum 630.03 mm in all three cases), so the placeholder does not mis-scale the
+output. The value is still set explicitly because it is correct and another
+engine may honour it. The earlier "critical" label was wrong.
 
-Progress is derived from stage runs, not fabricated. Each stage reports
-`{stage, status, started_at, ended_at, progress, detail}` and the API streams it over SSE.
+## 4. Technical debt
 
-## 4. Data model
+* `models_service._TRIMESH_FILE_TYPE` and the mapping now in `pipeline.py` are
+  duplicated format knowledge; both should come from one place.
+* `MaterialProfile` has no filament diameter, so D2 cannot be fixed from data.
+* `MeshRepair`, `Orientation`, `AiDecision` and `PrintJob` tables exist with no
+  writer. Schema is ahead of behaviour — which is deliberate, but each one needs
+  either an implementation or a documented `NOT IMPLEMENTED` endpoint.
+* The `RateLimitBucket` fixed-window limiter is single-node only.
+* `intelligence/` is an empty package with a docstring.
 
-See [`docs/database-schema.md`](docs/database-schema.md). Three rules govern it:
+## 5. Unsupported features (must stay explicit)
 
-1. **Profiles are versioned and immutable.** A `machine_profile` or `material_profile` row is
-   never updated in place; a new version row is inserted and the pointer moves. A `slice_job`
-   stores the exact profile *version ids* it ran against, so re-opening a year-old job shows the
-   machine as it was, not as it is now. A profile update therefore cannot silently invalidate
-   previously generated output.
-2. **Blobs are content-addressed and immutable**, keyed by SHA-256. Model versions, generated
-   G-code, analysis JSON and simulation frames all point at blobs. Uploading the same STL twice
-   stores it once.
-3. **Unoriginals are never mutated.** `model_versions.repaired_blob_id` is a *new* row. The
-   original blob is retained forever and is always downloadable.
-
-JSON is used for wide, read-whole analytical payloads (analysis reports, validation findings,
-AI decisions) and columns for anything that is queried or constrained. The JSON columns become
-`JSONB` on Postgres via a portable `JSONType`.
-
-## 5. Security posture
-
-| Threat | Control |
+| Feature | Where declared |
 | --- | --- |
-| Path traversal via filename | Filenames are **never** used as paths. Blobs are `blobs/<aa>/<sha256>`; the original name is stored as data and sanitised for display only. |
-| Malicious model file | Magic-byte format sniffing (never the extension), 200 MB cap, parser runs on a read-only copy, decompression-ratio limit on 3MF (zip-bomb guard) |
-| Command injection via slicer args | No `shell=True` anywhere. `CuraEngine` is invoked with an argv list; every setting value is validated against a typed schema before it reaches argv. |
-| Slicer crash / fork bomb | Dedicated worker process, `timeout`, output cap, `CREATE_NO_WINDOW`, killed process tree |
-| Secrets | All config from env; `AUTH_SECRET` must be explicitly set outside dev, and startup **fails** if it is left at the dev default |
-| Privilege escalation | Every read/write path resolves ownership through a guard; cross-tenant access is 404, not 403 (no existence oracle) |
-| Unbounded work | Per-user and per-IP rate limits, upload quotas, job queue depth caps |
+| Resin / powder-bed / metal slicing | `TechnologyRegistry`, `supported=False` |
+| MSLA / DLP / SLS / SLM | same |
+| OrcaSlicer, PrusaSlicer | absent from `SlicerRegistry`; the port supports them |
+| Mesh repair | `pipeline` reports `skipped`, `implemented: false` |
+| Print simulation | same |
+| Orientation optimisation | no endpoint, no UI affordance |
+| STEP/IGES conversion | `formats.NOT_IMPLEMENTED` |
+| `ai_decisions` | table only; no writer |
 
-## 6. The AI layer
+## 6. Proposed implementation boundaries
 
-The assistant is a tool-calling loop over the **same** service functions the HTTP API uses. It
-has no privileged write path. Its tools are the ones in §43 of the requirements
-(`analyze_model`, `optimize_parameters`, `run_slicer`, `validate_gcode`, …) and each is a thin
-binding over a deterministic service.
+Phases A–J from the task, mapped onto what already exists:
 
-Failure modes are engineered, not hoped away:
+| Phase | Lands in | Depends on |
+| --- | --- | --- |
+| A Fidelity | `cura_settings.py`, new `measurement.py`, new calibration suite | — |
+| B Mesh validation | new `app/services/geometry/validation.py` | — |
+| C Mesh repair | new `app/services/geometry/repair.py`; writes `MeshRepair` | B |
+| D Printer capabilities | new `PrinterCapabilities` projection over `MachineProfile` | A |
+| E Orientation | new `app/services/geometry/orientation.py`; writes `Orientation` | A, B |
+| F Toolpath analysis | extend `measurement.py`; `SimulationResult` | A |
+| G Viewer | extend `Viewport.tsx`; consume the canonical toolpath | F |
+| H Print intent | new `app/slicing/intent.py`; `Objective` stays as an alias | A |
+| I AI layer | `app/intelligence/` + `ai_decisions`; constrained schema, gated | A–H |
+| J Multi-slicer | new adapters; no core change | A |
 
-- **Unknown printer/material/nozzle** → the catalogue lookup returns no profile, the tool returns
-  `INSUFFICIENT_INFORMATION`, and the assistant is required to say so rather than interpolate.
-  There is no fallback "typical PLA" table consulted at generation time; profiles either exist
-  or the request stops.
-- **Confidence** is a recorded number with a method attached (`calibration: heuristic|historical|
-  uncalibrated`). A heuristic confidence is labelled as such in the UI and is never shown as a
-  percentage without that label.
-- **Explainability** is a storage requirement, not a prompt instruction: a decision without
-  non-empty `reason` and at least one evidence reference cannot be persisted.
+**Boundaries that must hold**
 
-## 7. Deliberate non-goals
-
-- **No in-house slicer.** Slicing is delegated to `CuraEngine` behind `SlicerEngineAdapter`.
-  Re-implementing plane sweep, perimeter generation and support meshing would be strictly worse
-  and unvalidatable.
-- **No "your print will be perfect".** All output is scoped to *digital* validation, with a
-  standing list of physical factors the software cannot observe (§41 of the requirements).
-- **No claimed printer support without a validated profile.** `machine_profiles.validation_status`
-  is a real column; the UI refuses to offer an unvalidated profile for output generation.
-- **No resin/SLS support in Phase 1.** The adapter interfaces are multi-technology, but shipping
-  an unvalidated `.ctb` writer would be exactly the "fake extension" the requirements forbid.
-  Marked `NOT IMPLEMENTED` until a real engine is validated.
+1. The optimizer and validator never learn an engine-specific setting name.
+2. Geometry decisions are deterministic. An LLM may rank candidates, never
+   compute them.
+3. Any AI output is a proposal validated against `MachineLimits` and the
+   material profile before use, and is recorded in `ai_decisions`.
+4. Every user-visible number is REQUESTED, GENERATED or MEASURED — and the
+   three are never conflated. A measurement of G-code is not a measurement of
+   plastic.
+5. An unimplemented stage reports `skipped` with `implemented: false`. Never a
+   green check.
+6. Original geometry is never mutated; prepared copies are separate artifacts.
+7. Licence metadata stays visible on every engine surface.
