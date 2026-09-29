@@ -77,9 +77,12 @@ def parse_toolpath(
 ) -> Toolpath:
     """Turn G-code into a renderable toolpath.
 
-    Layer boundaries come from the slicer's own `;LAYER:` markers when present
-    and are inferred from Z changes otherwise, so the viewer works for any
-    engine.
+    Layer boundaries come from the slicer's own `;LAYER:` markers when it emits
+    them, and are inferred from Z changes only when it does not.
+
+    Inferring from every Z change looks equivalent and is not: Z-hop moves change
+    Z without starting a layer, so a 67-layer print reported 253 layers and the
+    viewer's layer scrubber became useless.
     """
     path = Toolpath()
     x = y = z = 0.0
@@ -95,7 +98,14 @@ def parse_toolpath(
     extrusions = travels = retractions = 0
     total_extrusion_mm = 0.0
 
-    for _line_number, raw in iter_lines(text):
+    markers = layer_markers(text)
+    marker_by_line = {line: index for index, line in markers}
+    use_markers = bool(markers)
+
+    for line_number, raw in iter_lines(text):
+        if use_markers and line_number in marker_by_line:
+            layer = marker_by_line[line_number]
+
         body = raw.split(";", 1)[0].strip()
         if not body:
             continue
@@ -151,8 +161,9 @@ def parse_toolpath(
             kind = "travel"
             travels += 1
 
-        # A new Z height starts a new layer when the slicer gave no markers.
-        if abs(new_z - z) > 1e-9 and round(new_z, 3) not in seen_layer_z:
+        # A new Z height starts a new layer only when the slicer gave no
+        # markers. With markers, `layer` is already authoritative.
+        if not use_markers and abs(new_z - z) > 1e-9 and round(new_z, 3) not in seen_layer_z:
             seen_layer_z.add(round(new_z, 3))
             layer_z.append(new_z)
 
@@ -173,8 +184,21 @@ def parse_toolpath(
         min_y, max_y = min(min_y, y), max(max_y, y)
         min_z, max_z = min(min_z, z), max(max_z, z)
 
-    path.layer_z = sorted(layer_z)
-    path.layer_count = len(path.layer_z)
+    if use_markers:
+        # Trust the slicer's own layer numbering; record the print Z for each.
+        path.layer_count = max(markers, key=lambda item: item[0])[0] + 1
+        by_layer: dict[int, list[float]] = {}
+        for segment in path.segments:
+            if segment.layer is not None:
+                by_layer.setdefault(segment.layer, []).append(segment.z0)
+        layer_z = []
+        for index in range(path.layer_count):
+            values = by_layer.get(index)
+            layer_z.append(round(max(values), _PRECISION) if values else 0.0)
+    else:
+        path.layer_count = len(layer_z)
+
+    path.layer_z = layer_z
     path.bounds = {
         "min": [round(min_x, 3), round(min_y, 3), round(min_z, 3)]
         if min_x != float("inf")
