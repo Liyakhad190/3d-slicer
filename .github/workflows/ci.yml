@@ -1,0 +1,68 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install
+        run: pip install -e ".[dev,postgres]"
+
+      - name: Generate regression fixtures
+        run: python tests/fixtures/build.py
+
+      - name: Type and schema checks
+        run: |
+          python -m compileall -q app
+          PYTHONPATH=. alembic upgrade head
+          PYTHONPATH=. alembic check
+
+      # The engine-dependent tests are skipped, not faked, when no binary is
+      # present. Installing CuraEngine in CI needs AGPL review, so it is not
+      # done here; see docs/SLICER_ADAPTER_SPEC.md.
+      - name: Test
+        run: pytest -q -m "not slow"
+
+      - name: Test (includes engine tests if one is present)
+        run: pytest -q
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # TypeScript strict mode includes noUncheckedIndexedAccess; this gate has
+      # already caught real defects, so it is not advisory.
+      - name: Typecheck
+        run: pnpm exec tsc -b
+
+      - name: Build
+        run: pnpm exec vite build
