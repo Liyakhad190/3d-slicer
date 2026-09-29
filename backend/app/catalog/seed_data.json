@@ -1,0 +1,559 @@
+{
+  "$comment": [
+    "Machine and material profile seed data.",
+    "",
+    "These rows are COMMUNITY-SOURCED and are loaded with",
+    "validation_status = 'unvalidated'. That is deliberate: the platform refuses",
+    "to generate output for a machine profile that has not been bench-validated",
+    "on real hardware, and nothing in a data file can honestly claim to have been.",
+    "",
+    "To promote a profile, an operator runs it, confirms the build volume, thermal",
+    "limits, start/end G-code and speed ceilings against the real machine, then sets",
+    "validation_status = 'validated' with validated_at/validated_by. A change to any",
+    "value here creates a NEW profile_version; existing rows are never edited, so a",
+    "previously generated job keeps referring to the profile it actually ran with."
+  ],
+  "gcode_dialects": [
+    {
+      "name": "reprap",
+      "description": "Marlin/Klipper-style RepRap dialect. The most permissive of the FDM dialects; used as the baseline vocabulary.",
+      "known_commands": ["G0", "G1", "G2", "G3", "G28", "G29", "G90", "G91", "G92", "M82", "M83", "M104", "M140", "M106", "M107", "M109", "M190", "M114", "M115", "M117", "M400"],
+      "temperature_commands": ["M104", "M140", "M109", "M190"],
+      "extrusion_axis": ["E"],
+      "quirks": {
+        "requires_absolute_e_mode": false,
+        "e_axis_absolute_reset_on_home": true,
+        "supports_g2_g3": true
+      }
+    },
+    {
+      "name": "marlin",
+      "description": "Marlin firmware defaults, including temperature safety (M104/M140 caps, MAXTEMP watchdog).",
+      "known_commands": ["G0", "G1", "G2", "G3", "G28", "G29", "G90", "G91", "G92", "M82", "M83", "M104", "M109", "M140", "M190", "M106", "M107", "M114", "M115", "M400", "M500", "M501"],
+      "temperature_commands": ["M104", "M140", "M109", "M190"],
+      "extrusion_axis": ["E"],
+      "quirks": {
+        "requires_absolute_e_mode": false,
+        "maxtemp_nozzle_c": 300,
+        "maxtemp_bed_c": 120,
+        "e_axis_absolute_reset_on_home": true
+      }
+    },
+    {
+      "name": "klipper",
+      "description": "Klipper. Velocity/acceleration are set out of band, so the slicer emits M204/M205 rarely and relies on SET_VELOCITY_LIMIT in start G-code.",
+      "known_commands": ["G0", "G1", "G2", "G3", "G28", "G29", "G90", "G91", "G92", "M82", "M83", "M104", "M109", "M140", "M190", "M106", "M107", "M400"],
+      "temperature_commands": ["M104", "M109", "M140", "M190"],
+      "extrusion_axis": ["E"],
+      "quirks": {
+        "requires_absolute_e_mode": true,
+        "pressure_advance_configured_in_printer": true,
+        "square_corner_velocity_limit": true
+      }
+    },
+    {
+      "name": "repetier",
+      "description": "Repetier/Sprinter firmware dialect.",
+      "known_commands": ["G0", "G1", "G2", "G3", "G28", "G29", "G90", "G91", "G92", "M82", "M83", "M104", "M109", "M140", "M190", "M106", "M107", "M114"],
+      "temperature_commands": ["M104", "M140", "M109", "M190"],
+      "extrusion_axis": ["E"],
+      "quirks": {"requires_absolute_e_mode": false}
+    },
+    {
+      "name": "grbl",
+      "description": "GRBL for CNC-style motion control. No thermal commands at all, so temperature validation is meaningless here.",
+      "known_commands": ["G0", "G1", "G2", "G3", "G28", "G90", "G91", "G92", "G20", "G21"],
+      "temperature_commands": [],
+      "extrusion_axis": ["E"],
+      "quirks": {"has_extrusion": false, "no_thermal_control": true}
+    }
+  ],
+  "nozzles": [
+    {"diameter_mm": 0.2, "material": "brass", "variant": "standard", "wear_resistance_rating": 1, "notes": "Detail work; very slow and clog-prone."},
+    {"diameter_mm": 0.25, "material": "brass", "variant": "standard", "wear_resistance_rating": 1, "notes": "Between 0.2 and 0.4; popular for miniatures."},
+    {"diameter_mm": 0.3, "material": "brass", "variant": "standard", "wear_resistance_rating": 2},
+    {"diameter_mm": 0.4, "material": "brass", "variant": "standard", "wear_resistance_rating": 2, "notes": "The default. Cheapest to print with and the easiest to keep in calibration."},
+    {"diameter_mm": 0.4, "material": "hardened", "variant": "standard", "wear_resistance_rating": 4, "notes": "Required for abrasive filaments; must be paired with a hardened extrusion path."},
+    {"diameter_mm": 0.5, "material": "brass", "variant": "standard", "wear_resistance_rating": 2},
+    {"diameter_mm": 0.6, "material": "brass", "variant": "standard", "wear_resistance_rating": 2, "notes": "Fast and strong; poor at fine detail."},
+    {"diameter_mm": 0.6, "material": "hardened", "variant": "standard", "wear_resistance_rating": 4},
+    {"diameter_mm": 0.8, "material": "brass", "variant": "standard", "wear_resistance_rating": 2, "notes": "Draft and vase work."},
+    {"diameter_mm": 0.8, "material": "hardened", "variant": "standard", "wear_resistance_rating": 4},
+    {"diameter_mm": 1.0, "material": "brass", "variant": "standard", "wear_resistance_rating": 2, "notes": "Very fast, very coarse."},
+    {"diameter_mm": 1.0, "material": "hardened", "variant": "standard", "wear_resistance_rating": 4}
+  ],
+  "materials": [
+    {
+      "key": "pla", "display_name": "PLA", "family": "thermoplastic", "is_composite": false,
+      "profiles": [
+        {
+          "vendor": "generic", "brand_sku": "pla-generic",
+          "nozzle_temp": {"min": 190, "typical": 210, "max": 230},
+          "bed_temp": {"min": 50, "typical": 60, "max": 70},
+          "chamber_temp": null,
+          "glass_transition_c": 60,
+          "max_volumetric_flow_mm3s": 10.0,
+          "retraction": {"distance_mm": 0.8, "speed_mm_s": 40, "minimum_layer_mm": 0.1},
+          "print_speed": {"min": 30, "max": 200, "travel_max": 250},
+          "layer_height_range": {"min": 0.06, "max": 0.32},
+          "requires_enclosure": false,
+          "adhesion": {"bed_surfaces": ["PEI", "glass", "textured_PEI"], "recommended": "brim_or_raft_low", "warping_tendency": "low", "moisture_sensitivity": "low"},
+          "mechanical": {"tensile_mpa": 60, "impact_strength": "low", "elongation_pct": 6},
+          "moisture_sensitivity": "low",
+          "shrinkage_pct": 0.3,
+          "abrasiveness": "none",
+          "manufacturer_notes": "The default material. Needs no enclosure and bed temperatures stay low."
+        },
+        {
+          "vendor": "generic", "brand_sku": "pla-plus",
+          "nozzle_temp": {"min": 200, "typical": 215, "max": 240},
+          "bed_temp": {"min": 50, "typical": 60, "max": 70},
+          "chamber_temp": null,
+          "glass_transition_c": 63,
+          "max_volumetric_flow_mm3s": 11.0,
+          "retraction": {"distance_mm": 0.8, "speed_mm_s": 40, "minimum_layer_mm": 0.1},
+          "print_speed": {"min": 30, "max": 220, "travel_max": 250},
+          "layer_height_range": {"min": 0.06, "max": 0.32},
+          "requires_enclosure": false,
+          "adhesion": {"bed_surfaces": ["PEI", "glass", "textured_PEI"], "recommended": "brim_or_raft_low", "warping_tendency": "low", "moisture_sensitivity": "low"},
+          "mechanical": {"tensile_mpa": 70, "impact_strength": "medium", "elongation_pct": 8},
+          "moisture_sensitivity": "low",
+          "shrinkage_pct": 0.3,
+          "abrasiveness": "none",
+          "manufacturer_notes": "Tougher than standard PLA; impacts are far less likely to shatter it."
+        }
+      ]
+    },
+    {
+      "key": "petg", "display_name": "PETG", "family": "thermoplastic", "is_composite": false,
+      "profiles": [
+        {
+          "vendor": "generic", "brand_sku": "petg-generic",
+          "nozzle_temp": {"min": 225, "typical": 240, "max": 260},
+          "bed_temp": {"min": 70, "typical": 80, "max": 90},
+          "chamber_temp": null,
+          "glass_transition_c": 80,
+          "max_volumetric_flow_mm3s": 8.0,
+          "retraction": {"distance_mm": 1.0, "speed_mm_s": 40, "minimum_layer_mm": 0.1},
+          "print_speed": {"min": 25, "max": 150, "travel_max": 200},
+          "layer_height_range": {"min": 0.08, "max": 0.28},
+          "requires_enclosure": false,
+          "adhesion": {"bed_surfaces": ["textured_PEI", "PEI", "glass"], "recommended": "brim", "warping_tendency": "medium", "moisture_sensitivity": "high"},
+          "mechanical": {"tensile_mpa": 50, "impact_strength": "high", "elongation_pct": 20},
+          "moisture_sensitivity": "high",
+          "shrinkage_pct": 0.4,
+          "abrasiveness": "none",
+          "manufacturer_notes": "Hygroscopic: dry before printing or you will get stringing and lost strength. Strings more than PLA."
+        }
+      ]
+    },
+    {
+      "key": "abs", "display_name": "ABS", "family": "thermoplastic", "is_composite": false,
+      "profiles": [
+        {
+          "vendor": "generic", "brand_sku": "abs-generic",
+          "nozzle_temp": {"min": 240, "typical": 250, "max": 265},
+          "bed_temp": {"min": 90, "typical": 100, "max": 110},
+          "chamber_temp": {"min": 40, "typical": 50, "max": 60},
+          "glass_transition_c": 105,
+          "max_volumetric_flow_mm3s": 6.0,
+          "retraction": {"distance_mm": 1.0, "speed_mm_s": 40, "minimum_layer_mm": 0.1},
+          "print_speed": {"min": 20, "max": 120, "travel_max": 180},
+          "layer_height_range": {"min": 0.1, "max": 0.3},
+          "requires_enclosure": true,
+          "adhesion": {"bed_surfaces": ["textured_PEI", "ABS_sheet", "garolite"], "recommended": "brim_and_enclosure", "warping_tendency": "high", "moisture_sensitivity": "low"},
+          "mechanical": {"tensile_mpa": 40, "impact_strength": "high", "elongation_pct": 40},
+          "moisture_sensitivity": "low",
+          "shrinkage_pct": 0.6,
+          "abrasiveness": "none",
+          "manufacturer_notes": "Warps badly without an enclosure. Print an enclosure before trusting any ABS part for fit."
+        }
+      ]
+    },
+    {
+      "key": "asa", "display_name": "ASA", "family": "thermoplastic", "is_composite": false,
+      "profiles": [
+        {
+          "vendor": "generic", "brand_sku": "asa-generic",
+          "nozzle_temp": {"min": 240, "typical": 250, "max": 270},
+          "bed_temp": {"min": 90, "typical": 100, "max": 110},
+          "chamber_temp": {"min": 40, "typical": 50, "max": 60},
+          "glass_transition_c": 105,
+          "max_volumetric_flow_mm3s": 6.5,
+          "retraction": {"distance_mm": 1.0, "speed_mm_s": 40, "minimum_layer_mm": 0.1},
+          "print_speed": {"min": 20, "max": 130, "travel_max": 180},
+          "layer_height_range": {"min": 0.1, "max": 0.3},
+          "requires_enclosure": true,
+          "adhesion": {"bed_surfaces": ["textured_PEI", "ABS_sheet"], "recommended": "brim_and_enclosure", "warping_tendency": "high", "moisture_sensitivity": "low"},
+          "mechanical": {"tensile_mpa": 45, "impact_strength": "high", "elongation_pct": 30},
+          "moisture_sensitivity": "low",
+          "shrinkage_pct": 0.6,
+          "abrasiveness": "none",
+          "manufacturer_notes": "ABS with UV stability. Like ABS, needs an enclosure."
+        }
+      ]
+    },
+    {
+      "key": "tpu95a", "display_name": "TPU 95A", "family": "elastomer", "is_composite": false,
+      "profiles": [
+        {
+          "vendor": "generic", "brand_sku": "tpu95a-generic",
+          "nozzle_temp": {"min": 220, "typical": 230, "max": 240},
+          "bed_temp": {"min": 40, "typical": 50, "max": 60},
+          "chamber_temp": null,
+          "glass_transition_c": null,
+          "max_volumetric_flow_mm3s": 4.0,
+          "retraction": {"distance_mm": 0.5, "speed_mm_s": 25, "minimum_layer_mm": 0.2},
+          "print_speed": {"min": 15, "max": 60, "travel_max": 100},
+          "layer_height_range": {"min": 0.12, "max": 0.28},
+          "requires_enclosure": false,
+          "adhesion": {"bed_surfaces": ["PEI", "glass"], "recommended": "none", "warping_tendency": "low", "moisture_sensitivity": "medium"},
+          "mechanical": {"tensile_mpa": 30, "impact_strength": "very_high", "elongation_pct": 500},
+          "moisture_sensitivity": "medium",
+          "shrinkage_pct": 1.0,
+          "abrasiveness": "none",
+          "manufacturer_notes": "Flexible. Must NOT use a Bowden tube on most printers: the filament is too soft to push through."
+        }
+      ]
+    },
+    {
+      "key": "nylon", "display_name": "Nylon (PA)", "family": "polyamide", "is_composite": false,
+      "profiles": [
+        {
+          "vendor": "generic", "brand_sku": "nylon-generic",
+          "nozzle_temp": {"min": 250, "typical": 270, "max": 280},
+          "bed_temp": {"min": 70, "typical": 80, "max": 90},
+          "chamber_temp": {"min": 30, "typical": 40, "max": 50},
+          "glass_transition_c": 70,
+          "max_volumetric_flow_mm3s": 5.0,
+          "retraction": {"distance_mm": 1.0, "speed_mm_s": 30, "minimum_layer_mm": 0.1},
+          "print_speed": {"min": 15, "max": 100, "travel_max": 150},
+          "layer_height_range": {"min": 0.1, "max": 0.3},
+          "requires_enclosure": true,
+          "adhesion": {"bed_surfaces": ["garolite", "textured_PEI", "glass"], "recommended": "garolite_and_enclosure", "warping_tendency": "high", "moisture_sensitivity": "very_high"},
+          "mechanical": {"tensile_mpa": 75, "impact_strength": "high", "elongation_pct": 20},
+          "moisture_sensitivity": "very_high",
+          "shrinkage_pct": 1.5,
+          "abrasiveness": "none",
+          "manufacturer_notes": "Extremely hygroscopic. Must be dry and printed in a heated chamber; undried nylon is useless."
+        }
+      ]
+    },
+    {
+      "key": "pc", "display_name": "Polycarbonate", "family": "amorphous", "is_composite": false,
+      "profiles": [
+        {
+          "vendor": "generic", "brand_sku": "pc-generic",
+          "nozzle_temp": {"min": 260, "typical": 280, "max": 300},
+          "bed_temp": {"min": 90, "typical": 100, "max": 110},
+          "chamber_temp": {"min": 50, "typical": 60, "max": 80},
+          "glass_transition_c": 147,
+          "max_volumetric_flow_mm3s": 5.0,
+          "retraction": {"distance_mm": 1.0, "speed_mm_s": 30, "minimum_layer_mm": 0.1},
+          "print_speed": {"min": 15, "max": 100, "travel_max": 150},
+          "layer_height_range": {"min": 0.1, "max": 0.3},
+          "requires_enclosure": true,
+          "adhesion": {"bed_surfaces": ["textured_PEI", "garolite"], "recommended": "brim_and_enclosure", "warping_tendency": "very_high", "moisture_sensitivity": "medium"},
+          "mechanical": {"tensile_mpa": 60, "impact_strength": "very_high", "elongation_pct": 25},
+          "moisture_sensitivity": "medium",
+          "shrinkage_pct": 0.7,
+          "abrasiveness": "none",
+          "manufacturer_notes": "Needs a hot chamber and a hardened nozzle. Degrades the brass nozzle quickly."
+        }
+      ]
+    },
+    {
+      "key": "pa-cf", "display_name": "Nylon Carbon Fiber", "family": "polyamide", "is_composite": true,
+      "profiles": [
+        {
+          "vendor": "generic", "brand_sku": "pa-cf-generic",
+          "nozzle_temp": {"min": 260, "typical": 275, "max": 290},
+          "bed_temp": {"min": 70, "typical": 80, "max": 90},
+          "chamber_temp": {"min": 40, "typical": 50, "max": 60},
+          "glass_transition_c": 75,
+          "max_volumetric_flow_mm3s": 5.0,
+          "retraction": {"distance_mm": 0.6, "speed_mm_s": 25, "minimum_layer_mm": 0.1},
+          "print_speed": {"min": 15, "max": 100, "travel_max": 150},
+          "layer_height_range": {"min": 0.1, "max": 0.3},
+          "requires_enclosure": true,
+          "adhesion": {"bed_surfaces": ["textured_PEI", "garolite", "build_plate_spring_steel"], "recommended": "brim_and_enclosure", "warping_tendency": "medium", "moisture_sensitivity": "very_high"},
+          "mechanical": {"tensile_mpa": 90, "impact_strength": "medium", "elongation_pct": 15},
+          "moisture_sensitivity": "very_high",
+          "shrinkage_pct": 0.5,
+          "abrasiveness": "high",
+          "manufacturer_notes": "Abrasive: REQUIRES a hardened (steel/tungsten) nozzle and a hardened extruder path. A brass nozzle will wear out within hours."
+        }
+      ]
+    },
+    {
+      "key": "pla-cf", "display_name": "PLA Carbon Fiber", "family": "thermoplastic", "is_composite": true,
+      "profiles": [
+        {
+          "vendor": "generic", "brand_sku": "pla-cf-generic",
+          "nozzle_temp": {"min": 210, "typical": 225, "max": 240},
+          "bed_temp": {"min": 50, "typical": 60, "max": 70},
+          "chamber_temp": null,
+          "glass_transition_c": 65,
+          "max_volumetric_flow_mm3s": 10.0,
+          "retraction": {"distance_mm": 0.5, "speed_mm_s": 40, "minimum_layer_mm": 0.1},
+          "print_speed": {"min": 30, "max": 180, "travel_max": 250},
+          "layer_height_range": {"min": 0.06, "max": 0.32},
+          "requires_enclosure": false,
+          "adhesion": {"bed_surfaces": ["textured_PEI", "PEI", "build_plate_spring_steel"], "recommended": "brim", "warping_tendency": "low", "moisture_sensitivity": "low"},
+          "mechanical": {"tensile_mpa": 70, "impact_strength": "medium", "elongation_pct": 5},
+          "moisture_sensitivity": "low",
+          "shrinkage_pct": 0.2,
+          "abrasiveness": "high",
+          "manufacturer_notes": "Much stiffer than PLA and far less prone to stringing, but Abrasive: requires a hardened nozzle."
+        }
+      ]
+    },
+    {
+      "key": "petg-cf", "display_name": "PETG Carbon Fiber", "family": "thermoplastic", "is_composite": true,
+      "profiles": [
+        {
+          "vendor": "generic", "brand_sku": "petg-cf-generic",
+          "nozzle_temp": {"min": 240, "typical": 250, "max": 270},
+          "bed_temp": {"min": 70, "typical": 80, "max": 90},
+          "chamber_temp": null,
+          "glass_transition_c": 80,
+          "max_volumetric_flow_mm3s": 8.0,
+          "retraction": {"distance_mm": 0.5, "speed_mm_s": 35, "minimum_layer_mm": 0.1},
+          "print_speed": {"min": 25, "max": 150, "travel_max": 200},
+          "layer_height_range": {"min": 0.08, "max": 0.28},
+          "requires_enclosure": false,
+          "adhesion": {"bed_surfaces": ["textured_PEI", "build_plate_spring_steel"], "recommended": "brim", "warping_tendency": "medium", "moisture_sensitivity": "medium"},
+          "mechanical": {"tensile_mpa": 60, "impact_strength": "high", "elongation_pct": 12},
+          "moisture_sensitivity": "medium",
+          "shrinkage_pct": 0.3,
+          "abrasiveness": "high",
+          "manufacturer_notes": "Stiffer and far less stringy than neat PETG. Abrasive: hardened nozzle required."
+        }
+      ]
+    },
+    {
+      "key": "pa6-gf", "display_name": "Nylon Glass Fiber", "family": "polyamide", "is_composite": true,
+      "profiles": [
+        {
+          "vendor": "generic", "brand_sku": "pa6-gf-generic",
+          "nozzle_temp": {"min": 250, "typical": 270, "max": 285},
+          "bed_temp": {"min": 70, "typical": 80, "max": 90},
+          "chamber_temp": {"min": 40, "typical": 50, "max": 60},
+          "glass_transition_c": 80,
+          "max_volumetric_flow_mm3s": 5.0,
+          "retraction": {"distance_mm": 0.6, "speed_mm_s": 25, "minimum_layer_mm": 0.1},
+          "print_speed": {"min": 15, "max": 100, "travel_max": 150},
+          "layer_height_range": {"min": 0.1, "max": 0.3},
+          "requires_enclosure": true,
+          "adhesion": {"bed_surfaces": ["textured_PEI", "garolite", "build_plate_spring_steel"], "recommended": "brim_and_enclosure", "warping_tendency": "medium", "moisture_sensitivity": "very_high"},
+          "mechanical": {"tensile_mpa": 85, "impact_strength": "medium", "elongation_pct": 8},
+          "moisture_sensitivity": "very_high",
+          "shrinkage_pct": 0.4,
+          "abrasiveness": "high",
+          "manufacturer_notes": "Stiffer and more dimensionally stable than neat nylon. Abrasive: hardened nozzle required."
+        }
+      ]
+    }
+  ],
+  "machines": [
+    {
+      "vendor": "Creality", "model": "Ender 3", "generation": null,
+      "technology": "fdm", "motion_system": "cartesian",
+      "documentation_url": "https://www.creality.com/products/ender-3-3d-printer",
+      "known_limitations": [
+        "Stock Mk8-style heated bed is a spring steel sheet; a glass bed needs a 100 V heater upgrade on some variants.",
+        "The stock nozzle and hotend are brass and are not compatible with abrasive filament."
+      ],
+      "profile": {
+        "build_volume": {"x": 220, "y": 220, "z": 250},
+        "bed_type": "heated_spring_steel",
+        "heated_bed": true,
+        "chamber": {"heated": false, "max_c": 0},
+        "nozzle_diameters": [0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.8],
+        "extruders": 1,
+        "temperature_limits": {
+          "nozzle": {"min": 0, "max": 260},
+          "bed": {"min": 0, "max": 100},
+          "chamber": {"min": 0, "max": 0}
+        },
+        "speed_limits": {
+          "max_print_speed_mm_s": 100,
+          "max_travel_speed_mm_s": 150,
+          "max_acceleration_mm_s2": 500,
+          "max_accel_to_accel_mm_s2": 750
+        },
+        "max_volumetric_flow_mm3s": 8.0,
+        "machine_restrictions": {
+          "direct_drive_only_materials": ["tpu95a", "nylon", "pc", "pa-cf", "pa6-gf"],
+          "no_abrasive_filament_with_brass_path": true,
+          "z_axis_needs_homing_before_print": true
+        },
+        "start_gcode": "G28 ; Home all axes\nG92 E0\nM140 S60\nM104 S210\nG28 Z0.3\n",
+        "end_gcode": "M104 S0\nM140 S0\nG91\nG1 Z10 F600\nG90\nG1 X0 Y200 F3000\nM84\n",
+        "gcode_dialect": "marlin",
+        "calibration_requirements": {
+          "required": ["e_steps_per_mm", "flow_rate", "bed_mesh_leveling", "first_layer_height"],
+          "recommended": ["pressure_advance", "input_shaping"]
+        }
+      }
+    },
+    {
+      "vendor": "Prusa Research", "model": "MK4S", "generation": "MK4",
+      "technology": "fdm", "motion_system": "corexy",
+      "documentation_url": "https://prusa3d.com/mk4s",
+      "known_limitations": [
+        "The Nextruder is not compatible with abrasive filament without a hardened extruder and hardened nozzle."
+      ],
+      "profile": {
+        "build_volume": {"x": 250, "y": 210, "z": 220},
+        "bed_type": "textured_PEI",
+        "heated_bed": true,
+        "chamber": {"heated": false, "max_c": 60},
+        "nozzle_diameters": [0.2, 0.25, 0.3, 0.4, 0.5, 0.6],
+        "extruders": 1,
+        "temperature_limits": {
+          "nozzle": {"min": 0, "max": 290},
+          "bed": {"min": 0, "max": 120},
+          "chamber": {"min": 0, "max": 60}
+        },
+        "speed_limits": {
+          "max_print_speed_mm_s": 300,
+          "max_travel_speed_mm_s": 400,
+          "max_acceleration_mm_s2": 2500,
+          "max_accel_to_accel_mm_s2": 4000
+        },
+        "max_volumetric_flow_mm3s": 24.0,
+        "machine_restrictions": {
+          "direct_drive_only_materials": [],
+          "no_abrasive_filament_with_brass_path": true
+        },
+        "start_gcode": "M140 S60\nM104 S215\nG28\nG92 E0\n",
+        "end_gcode": "M104 S0\nM140 S0\nG91\nG1 Z10 F780\nG90\nG1 X0 Y0 F10400\nM84\n",
+        "gcode_dialect": "marlin",
+        "calibration_requirements": {
+          "required": ["e_steps_per_mm", "flow_rate", "first_layer_height", "input_shaping"],
+          "recommended": ["pressure_advance"]
+        }
+      }
+    },
+    {
+      "vendor": "Bambu Lab", "model": "X1 Carbon", "generation": "X1",
+      "technology": "fdm", "motion_system": "corexy",
+      "documentation_url": "https://bambulab.com/en/x1",
+      "known_limitations": [
+        "A sealed chamber means high-temperature plastics can be printed, but only at the cost of very long heat-soak times.",
+        "Firmware restricts third-party G-code in ways a generic slicer output must respect; do not disable it without understanding the risk."
+      ],
+      "profile": {
+        "build_volume": {"x": 256, "y": 256, "z": 256},
+        "bed_type": "textured_PEI",
+        "heated_bed": true,
+        "chamber": {"heated": true, "max_c": 60},
+        "nozzle_diameters": [0.2, 0.4, 0.6, 0.8],
+        "extruders": 1,
+        "temperature_limits": {
+          "nozzle": {"min": 0, "max": 300},
+          "bed": {"min": 0, "max": 120},
+          "chamber": {"min": 0, "max": 60}
+        },
+        "speed_limits": {
+          "max_print_speed_mm_s": 500,
+          "max_travel_speed_mm_s": 1000,
+          "max_acceleration_mm_s2": 10000,
+          "max_accel_to_accel_mm_s2": 10000
+        },
+        "max_volumetric_flow_mm3s": 21.0,
+        "machine_restrictions": {
+          "direct_drive_only_materials": [],
+          "no_abrasive_filament_with_brass_path": true
+        },
+        "start_gcode": "M1002 gcode_claim_action : 2\nM140 S60\nM104 S220\nG28\nG92 E0\n",
+        "end_gcode": "M104 S0\nM140 S0\nG91\nG1 Z10 F600\nG90\nG1 X0 Y0 F3000\nM84\n",
+        "gcode_dialect": "marlin",
+        "calibration_requirements": {
+          "required": ["e_steps_per_mm", "flow_rate", "first_layer_height", "pressure_advance"],
+          "recommended": ["input_shaping"]
+        }
+      }
+    },
+    {
+      "vendor": "Bambu Lab", "model": "P1S", "generation": "P1",
+      "technology": "fdm", "motion_system": "corexy",
+      "documentation_url": "https://bambulab.com/en/p1",
+      "known_limitations": [
+        "Not officially certified for high-temperature engineering polymers."
+      ],
+      "profile": {
+        "build_volume": {"x": 256, "y": 256, "z": 256},
+        "bed_type": "textured_PEI",
+        "heated_bed": true,
+        "chamber": {"heated": false, "max_c": 60},
+        "nozzle_diameters": [0.2, 0.4, 0.6, 0.8],
+        "extruders": 1,
+        "temperature_limits": {
+          "nozzle": {"min": 0, "max": 300},
+          "bed": {"min": 0, "max": 100},
+          "chamber": {"min": 0, "max": 60}
+        },
+        "speed_limits": {
+          "max_print_speed_mm_s": 500,
+          "max_travel_speed_mm_s": 1000,
+          "max_acceleration_mm_s2": 20000,
+          "max_accel_to_accel_mm_s2": 20000
+        },
+        "max_volumetric_flow_mm3s": 21.0,
+        "machine_restrictions": {
+          "direct_drive_only_materials": [],
+          "no_abrasive_filament_with_brass_path": true
+        },
+        "start_gcode": "M140 S60\nM104 S220\nG28\nG92 E0\n",
+        "end_gcode": "M104 S0\nM140 S0\nG91\nG1 Z10 F600\nG90\nG1 X0 Y0 F3000\nM84\n",
+        "gcode_dialect": "marlin",
+        "calibration_requirements": {
+          "required": ["e_steps_per_mm", "flow_rate", "first_layer_height", "pressure_advance"],
+          "recommended": ["input_shaping"]
+        }
+      }
+    },
+    {
+      "vendor": "Voron Design", "model": "Voron 2.4 (350)", "generation": "2.4",
+      "technology": "fdm", "motion_system": "corexy",
+      "documentation_url": "https://docs.voron.build/",
+      "known_limitations": [
+        "A DIY build: the exact machine depends on which BOM was used, so this profile is a community approximation and MUST be validated against the specific unit before use.",
+        "Klipper firmware. Pressure advance and input shaping are configured in printer.cfg, not in the sliced G-code."
+      ],
+      "profile": {
+        "build_volume": {"x": 350, "y": 350, "z": 340},
+        "bed_type": "PEI_spring_steel",
+        "heated_bed": true,
+        "chamber": {"heated": true, "max_c": 65},
+        "nozzle_diameters": [0.4, 0.6, 0.8],
+        "extruders": 1,
+        "temperature_limits": {
+          "nozzle": {"min": 0, "max": 300},
+          "bed": {"min": 0, "max": 120},
+          "chamber": {"min": 0, "max": 65}
+        },
+        "speed_limits": {
+          "max_print_speed_mm_s": 500,
+          "max_travel_speed_mm_s": 500,
+          "max_acceleration_mm_s2": 10000,
+          "max_accel_to_accel_mm_s2": 10000
+        },
+        "max_volumetric_flow_mm3s": 30.0,
+        "machine_restrictions": {
+          "direct_drive_only_materials": [],
+          "no_abrasive_filament_with_brass_path": true
+        },
+        "start_gcode": "SET_VELOCITY_LIMIT ACCEL=10000, VELOCITY=500\nSTART_PRINT\n",
+        "end_gcode": "END_PRINT\n",
+        "gcode_dialect": "klipper",
+        "calibration_requirements": {
+          "required": ["e_steps_per_mm", "flow_rate", "first_layer_height", "pressure_advance", "input_shaping"],
+          "recommended": ["quad_gantry_level", "tmc_driver_rms_current"]
+        }
+      }
+    }
+  ]
+}

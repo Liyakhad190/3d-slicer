@@ -18,12 +18,16 @@ _CONFIGURED = False
 def configure_logging(level: str = "INFO", json_output: bool = True) -> None:
     global _CONFIGURED
 
+    # These processors are chosen to match the PrintLoggerFactory below.
+    # structlog.stdlib.add_logger_name / add_log_level expect a stdlib logger
+    # and raise AttributeError against a PrintLogger, so the stdlib-only
+    # processors are deliberately not used here.
     shared: list[Any] = [
         structlog.contextvars.merge_contextvars,
-        structlog.stdlib.add_log_level,
-        structlog.stdlib.add_logger_name,
+        structlog.processors.add_log_level,
         structlog.processors.TimeStamper(fmt="iso", utc=True),
         structlog.processors.StackInfoRenderer(),
+        structlog.processors.format_exc_info,
         structlog.processors.UnicodeDecoder(),
     ]
 

@@ -165,7 +165,9 @@ class MachineProfile(Base):
     calibration_requirements: Mapped[dict[str, Any]] = mapped_column(
         JSONType, default=dict, nullable=False
     )
-    created_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        TZDateTime, nullable=False, index=True, default=utcnow
+    )
 
     machine: Mapped[Machine] = relationship(back_populates="profiles")
 
@@ -262,6 +264,8 @@ class MaterialProfile(Base):
         default=Abrasiveness.none,
     )
     manufacturer_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        TZDateTime, nullable=False, index=True, default=utcnow
+    )
 
     material: Mapped[Material] = relationship(back_populates="profiles")

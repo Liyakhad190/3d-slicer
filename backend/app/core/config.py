@@ -11,14 +11,17 @@ import functools
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_DATA_DIR = REPO_ROOT / "data"
 
 _DEV_AUTH_SECRET = "dev-insecure-secret-change-me"  # noqa: S105 - dev-only sentinel
-_DEV_DATABASE_URL = "sqlite+pysqlite:///./data/slicing.db"
+#: A relative SQLite path is resolved against `data_dir`, so this means
+#: `<data_dir>/slicing.db`. Switch to
+#: `postgresql+psycopg://user:pass@host:5432/slicing` for production.
+_DEV_DATABASE_URL = "sqlite+pysqlite:///slicing.db"
 
 
 class Settings(BaseSettings):
@@ -107,6 +110,25 @@ class Settings(BaseSettings):
     def _abs_data_dir(cls, value: Path) -> Path:
         return value.expanduser().resolve()
 
+    @model_validator(mode="after")
+    def _resolve_sqlite_path(self) -> "Settings":
+        """Anchor a relative SQLite URL to the repo data directory.
+
+        A bare `sqlite+pysqlite:///./data/slicing.db` silently depends on the
+        process working directory, which differs between uvicorn, pytest and a
+        worker started from elsewhere. Resolving it here means the same
+        DATABASE_URL always means the same file.
+        """
+        url = self.database_url
+        prefix = "sqlite+pysqlite:///"
+        if url.startswith(prefix):
+            raw_path = url[len(prefix) :]
+            path = Path(raw_path)
+            if not path.is_absolute():
+                path = (self.data_dir / path).resolve()
+            self.database_url = f"{prefix}{path.as_posix()}"
+        return self
+
     @property
     def blob_dir(self) -> Path:
         return self.data_dir / self.blob_dir_name
@@ -122,6 +144,7 @@ class Settings(BaseSettings):
     def validate_runtime(self) -> list[str]:
         """Return a list of startup errors. Empty means safe to serve traffic."""
         problems: list[str] = []
+        self.data_dir.mkdir(parents=True, exist_ok=True)
         if self.is_production:
             if self.auth_secret == _DEV_AUTH_SECRET:
                 problems.append(

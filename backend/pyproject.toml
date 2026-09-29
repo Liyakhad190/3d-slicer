@@ -1,0 +1,76 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "slicing-platform-backend"
+version = "0.1.0"
+description = "AI-powered autonomous 3D-print slicing and print-validation platform"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi==0.115.6",
+    "uvicorn[standard]==0.34.0",
+    "pydantic==2.10.4",
+    "pydantic-settings==2.7.0",
+    "email-validator==2.2.0",
+    "sqlalchemy==2.0.36",
+    "alembic==1.14.0",
+    "python-multipart==0.0.20",
+    "orjson==3.10.12",
+    "PyJWT==2.10.1",
+    "argon2-cffi==23.1.0",
+    "structlog==24.4.0",
+    "numpy==2.2.1",
+    "scipy==1.15.1",
+    "trimesh==4.5.3",
+    "manifold3d==2.5.1",
+    "networkx==3.4.2",
+    "shapely==2.0.6",
+    "rtree==1.3.0",
+    "typer==0.15.1",
+    "rich==13.9.4",
+]
+
+[project.optional-dependencies]
+# PostgreSQL driver for production.
+postgres = ["psycopg[binary]==3.2.3"]
+# Redis-backed queue/rate limiting. Not required: the platform ships a
+# database-backed queue that works on a single node without Redis.
+redis = ["redis==5.2.1"]
+# OpenAI-compatible LLM client for the intelligence layer.
+ai = ["httpx==0.28.1"]
+dev = [
+    "pytest==8.3.4",
+    "pytest-asyncio==0.25.0",
+    "pytest-cov==6.0.0",
+    "httpx==0.28.1",
+]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-q --strict-markers --tb=short"
+filterwarnings = [
+    "ignore::DeprecationWarning:pymeshlab.*",
+]
+markers = [
+    "slow: tests that invoke the real slicing engine",
+    "integration: tests that exercise the full HTTP stack",
+]
+
+[tool.coverage.run]
+source = ["app"]
+omit = ["*/migrations/*", "*/__pycache__/*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+]

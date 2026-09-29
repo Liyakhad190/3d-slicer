@@ -21,7 +21,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.db.base import Base, JSONType, TimestampMixin, TZDateTime, uuid_pk
+from app.db.base import Base, JSONType, TimestampMixin, TZDateTime, utcnow, uuid_pk
 
 
 class Blob(Base):
@@ -41,7 +41,9 @@ class Blob(Base):
     media_type: Mapped[str] = mapped_column(String(120), nullable=False, default="application/octet-stream")
     detected_format: Mapped[str] = mapped_column(String(32), nullable=False, default="unknown")
     storage_path: Mapped[str] = mapped_column(String(255), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        TZDateTime, nullable=False, index=True, default=utcnow
+    )
 
 
 class Model(Base, TimestampMixin):
@@ -138,7 +140,9 @@ class ModelAnalysis(Base):
         JSONType, default=dict, nullable=False
     )
     duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    created_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        TZDateTime, nullable=False, index=True, default=utcnow
+    )
 
     model_version: Mapped[ModelVersion] = relationship(back_populates="analyses")
 
@@ -164,7 +168,9 @@ class MeshRepair(Base):
         ForeignKey("blobs.id", ondelete="SET NULL"), nullable=True
     )
     user_approved: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    created_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        TZDateTime, nullable=False, index=True, default=utcnow
+    )
 
 
 class Orientation(Base):
@@ -191,4 +197,6 @@ class Orientation(Base):
     confidence: Mapped[Decimal | None] = mapped_column(Numeric(4, 3), nullable=True)
     rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
     evidence: Mapped[list[Any]] = mapped_column(JSONType, default=list, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        TZDateTime, nullable=False, index=True, default=utcnow
+    )
