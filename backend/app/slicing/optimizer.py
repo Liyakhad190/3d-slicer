@@ -185,7 +185,7 @@ class ParameterOptimizer:
         self._resolve_infill(objective, record, locked)
         self._resolve_shell(objective, record, locked)
         speed, _ = self._resolve_motion(objective, record, locked)
-        self._resolve_temperatures(record, locked)
+        self._resolve_temperatures(record, locked, block_reasons=block_reasons, warnings=warnings)
         self._resolve_cooling(record, locked)
         self._resolve_retraction(record, locked, speed)
         self._resolve_support(geometry, objective, record, locked)
@@ -372,34 +372,39 @@ class ParameterOptimizer:
                    f"Travel is 3x print speed, capped at the machine's {travel_ceiling:.0f} mm/s ceiling.")
         return speed, accel
 
-    def _resolve_temperatures(self, record: Record, locked: dict[str, Any]) -> tuple[int, int]:
-        nozzle_range = self.material.nozzle_temp or {}
-        bed_range = self.material.bed_temp or {}
+    def _resolve_temperatures(
+        self,
+        record: Record,
+        locked: dict[str, Any],
+        block_reasons: list[str] | None = None,
+        warnings: list[str] | None = None,
+    ) -> tuple[int, int]:
+        from app.slicing.temperature import resolve_safe_temperatures
 
-        if "nozzle_temperature_c" in locked:
-            nozzle_temp = int(locked["nozzle_temperature_c"])
-            record("nozzle_temperature_c", nozzle_temp, "user", "Locked by the user.", 1.0)
-        else:
-            typical = float(nozzle_range.get("typical") or 210)
-            ceiling = min(float(nozzle_range.get("max") or typical), self.limits.nozzle_max_c)
-            floor = float(nozzle_range.get("min") or 0)
-            nozzle_temp = int(max(floor, min(typical, ceiling)))
-            record("nozzle_temperature_c", nozzle_temp, "material",
-                   f"{nozzle_temp} C: the material's typical nozzle temperature, clamped into the "
-                   f"material range and the machine's {self.limits.nozzle_max_c:.0f} C limit.")
+        user_nozzle = locked.get("nozzle_temperature_c") or locked.get("material_print_temperature")
+        user_bed = locked.get("bed_temperature_c") or locked.get("material_bed_temperature")
 
-        if "bed_temperature_c" in locked:
-            bed_temp = int(locked["bed_temperature_c"])
-            record("bed_temperature_c", bed_temp, "user", "Locked by the user.", 1.0)
-        else:
-            typical = float(bed_range.get("typical") or 60)
-            ceiling = min(float(bed_range.get("max") or typical), self.limits.bed_max_c)
-            floor = float(bed_range.get("min") or 0)
-            bed_temp = int(max(floor, min(typical, ceiling)))
-            record("bed_temperature_c", bed_temp, "material",
-                   f"{bed_temp} C bed: the material's typical value, clamped into the material "
-                   f"range and the machine's {self.limits.bed_max_c:.0f} C limit.")
-        return nozzle_temp, bed_temp
+        temp_res = resolve_safe_temperatures(
+            machine_profile=self.profile,
+            material_profile=self.material,
+            user_override_nozzle=user_nozzle,
+            user_override_bed=user_bed,
+        )
+
+        if temp_res.is_conflict:
+            msg = f"{temp_res.conflict_code}: {temp_res.conflict_message or temp_res.reason}"
+            if block_reasons is not None:
+                block_reasons.append(msg)
+            log.warning("temperature.conflict", conflict=msg)
+
+        if warnings is not None and temp_res.warnings:
+            warnings.extend(temp_res.warnings)
+
+        record("nozzle_temperature_c", temp_res.target_nozzle_temp_c, temp_res.provenance, temp_res.reason, 1.0 if user_nozzle else 0.9)
+        record("first_layer_temperature_c", temp_res.first_layer_nozzle_temp_c, temp_res.provenance, f"First layer nozzle temperature: {temp_res.first_layer_nozzle_temp_c} C.", 0.9)
+        record("bed_temperature_c", temp_res.target_bed_temp_c, "user" if user_bed else "material", f"{temp_res.target_bed_temp_c} C bed temperature.", 1.0 if user_bed else 0.8)
+
+        return temp_res.target_nozzle_temp_c, temp_res.target_bed_temp_c
 
     def _resolve_cooling(self, record: Record, locked: dict[str, Any]) -> int:
         if "cooling_fan_percent" in locked:

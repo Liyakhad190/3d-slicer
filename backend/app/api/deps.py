@@ -206,12 +206,22 @@ def owned_job(db: Session, user: User, job_id: uuid.UUID) -> SliceJob:
     return job
 
 
-def owned_printer(db: Session, user: User, printer_id: uuid.UUID):
+def owned_printer(
+    db: Session,
+    user: User,
+    printer_id: uuid.UUID,
+    *,
+    include_archived: bool = False,
+):
     from app.models.catalog import Printer
 
-    printer = db.execute(
-        select(Printer).where(Printer.id == printer_id, Printer.user_id == user.id)
-    ).scalar_one_or_none()
+    statement = select(Printer).where(
+        Printer.id == printer_id,
+        Printer.user_id == user.id,
+    )
+    if not include_archived:
+        statement = statement.where(Printer.archived_at.is_(None))
+    printer = db.execute(statement).scalar_one_or_none()
     if printer is None:
         raise NotFoundError("The requested resource does not exist.")
     return printer

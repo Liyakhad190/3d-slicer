@@ -9,14 +9,14 @@ from fastapi.responses import JSONResponse
 
 from app.api.deps import CurrentUser, DbSession, SettingsDep, rate_limit
 from app.core.config import Settings
-from app.core.errors import UnsupportedFormatError
 from app.core.logging import get_logger
-from app.models.assets import Blob
 from app.schemas.api import (
     AnalysisResponse,
     FormatCapability,
     ModelResponse,
     ModelVersionResponse,
+    ModelTransformRequest,
+    ModelTransformResponse,
     UploadResponse,
 )
 from app.services import models_service, storage
@@ -107,16 +107,18 @@ def download_version(
     version_id: uuid.UUID, db: DbSession, user: CurrentUser
 ) -> Response:
     version = models_service.get_version(db, user, version_id)
-    blob = db.get(Blob, version.blob_id)
-    if blob is None:  # pragma: no cover
-        raise UnsupportedFormatError("The stored file is missing.")
+    blob = models_service.active_blob(db, version)
     data = storage.read_blob(blob)
     # The stored name is data, not a path; quote it properly in the header.
     return Response(
         content=data,
         media_type=blob.media_type,
         headers={
-            "Content-Disposition": f'attachment; filename="{version.sanitized_filename}"',
+            "Content-Disposition": (
+                f'attachment; filename="{version.sanitized_filename.rsplit(".", 1)[0]}.stl"'
+                if version.transformed_blob_id
+                else f'attachment; filename="{version.sanitized_filename}"'
+            ),
             "X-Content-SHA256": blob.sha256,
         },
     )
@@ -145,3 +147,33 @@ def analyze(
     )
     payload = report.to_dict()
     return AnalysisResponse.model_validate(payload)
+
+
+@router.post(
+    "/versions/{version_id}/transform",
+    response_model=ModelTransformResponse,
+    summary="Scale or reset a model and re-analyse the resulting geometry",
+)
+def transform(
+    version_id: uuid.UUID,
+    body: ModelTransformRequest,
+    db: DbSession,
+    user: CurrentUser,
+) -> ModelTransformResponse:
+    version = models_service.get_version(db, user, version_id)
+    report = (
+        models_service.reset_transformation(db, version=version)
+        if body.reset
+        else models_service.transform_model(
+            db,
+            version=version,
+            scale_percent=body.scale_percent,
+            target_dimensions_mm=body.target_dimensions_mm,
+            preserve_aspect_ratio=body.preserve_aspect_ratio,
+        )
+    )
+    return ModelTransformResponse(
+        version=ModelVersionResponse.model_validate(version),
+        analysis=AnalysisResponse.model_validate(report.to_dict()),
+        dimensions_mm=report.metrics.dimensions_mm,
+    )

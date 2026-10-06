@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from decimal import Decimal
 
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, Query, Response, status
 from sqlalchemy import select
 
 from app.api.deps import CurrentUser, DbSession, owned_printer
@@ -21,6 +21,7 @@ from app.models.catalog import (
     ValidationStatus,
 )
 from app.models.identity import AuditLog
+from app.db.base import utcnow
 from app.schemas.api import (
     MachineProfileResponse,
     MachineResponse,
@@ -29,6 +30,7 @@ from app.schemas.api import (
     NozzleResponse,
     PrinterCreate,
     PrinterResponse,
+    TemperatureRangeResponse,
 )
 
 log = get_logger(__name__)
@@ -111,7 +113,9 @@ def list_nozzles(
 @router.get("/printers", response_model=list[PrinterResponse], summary="Your printers")
 def list_printers(db: DbSession, user: CurrentUser) -> list[PrinterResponse]:
     rows = db.execute(
-        select(Printer).where(Printer.user_id == user.id).order_by(Printer.created_at)
+        select(Printer)
+        .where(Printer.user_id == user.id, Printer.archived_at.is_(None))
+        .order_by(Printer.created_at)
     ).scalars()
     return [PrinterResponse.model_validate(r) for r in rows]
 
@@ -185,3 +189,73 @@ def create_printer(payload: PrinterCreate, db: DbSession, user: CurrentUser) -> 
 @router.get("/printers/{printer_id}", response_model=PrinterResponse, summary="One printer")
 def get_printer(printer_id: uuid.UUID, db: DbSession, user: CurrentUser) -> PrinterResponse:
     return PrinterResponse.model_validate(owned_printer(db, user, printer_id))
+
+
+@router.delete(
+    "/printers/{printer_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Remove a printer from the active printer list",
+)
+def archive_printer(printer_id: uuid.UUID, db: DbSession, user: CurrentUser) -> Response:
+    printer = owned_printer(db, user, printer_id)
+    printer.archived_at = utcnow()
+    printer.is_default = False
+    db.add(
+        AuditLog(
+            actor_user_id=user.id,
+            action="printer.archived",
+            object_type="printer",
+            object_id=printer.id,
+            after={"name": printer.name},
+        )
+    )
+    db.flush()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get(
+    "/temperature-range",
+    response_model=TemperatureRangeResponse,
+    summary="Deterministically resolve safe temperature limits for printer and material",
+)
+def get_temperature_range(
+    printer_id: uuid.UUID,
+    material_profile_id: uuid.UUID,
+    db: DbSession,
+    user: CurrentUser,
+    nozzle_diameter_mm: Decimal | None = None,
+) -> TemperatureRangeResponse:
+    from app.core.errors import NotFoundError
+    from app.slicing.temperature import resolve_safe_temperatures
+
+    printer = owned_printer(db, user, printer_id)
+    machine_profile = db.get(MachineProfile, printer.machine_profile_id)
+    if machine_profile is None:
+        raise NotFoundError("Machine profile not found.")
+    material_profile = db.get(MaterialProfile, material_profile_id)
+    if material_profile is None:
+        raise NotFoundError("Material profile not found.")
+
+    res = resolve_safe_temperatures(
+        machine_profile=machine_profile,
+        material_profile=material_profile,
+    )
+    return TemperatureRangeResponse(
+        status="conflict" if res.is_conflict else "valid",
+        safe_min_c=res.safe_min_c,
+        safe_max_c=res.safe_max_c,
+        recommended_c=res.target_nozzle_temp_c,
+        first_layer_recommended_c=res.first_layer_nozzle_temp_c,
+        printer_min_c=res.printer_min_c,
+        printer_max_c=res.printer_max_c,
+        material_min_c=res.material_min_c,
+        material_max_c=res.material_max_c,
+        bed_safe_min_c=res.bed_safe_min_c,
+        bed_safe_max_c=res.bed_safe_max_c,
+        bed_recommended_c=res.target_bed_temp_c,
+        provenance=res.provenance,
+        reason=res.reason,
+        conflict_code=res.conflict_code,
+        conflict_message=res.conflict_message,
+        warnings=res.warnings,
+    )

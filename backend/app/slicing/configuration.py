@@ -123,6 +123,31 @@ class PrintConfiguration:
             )
 
 
+def canonical_parameter_overrides(overrides: dict[str, Any]) -> dict[str, Any]:
+    """Translate accepted AI intent fields into operative configuration keys."""
+    result = dict(overrides)
+    aliases = {
+        "layer_height": "layer_height_mm",
+        "wall_line_count": "wall_count",
+        "infill_sparse_density": "infill_density_percent",
+        "wall_speed_mm_s": "outer_wall_speed_mm_s",
+    }
+    for source, target in aliases.items():
+        if source not in result:
+            continue
+        value = result.pop(source)
+        result.setdefault(target, value)
+
+    shell_values = [
+        result.pop(key)
+        for key in ("top_layer_count", "bottom_layer_count")
+        if key in result
+    ]
+    if shell_values:
+        result.setdefault("top_bottom_layers", max(int(value) for value in shell_values))
+    return result
+
+
 def from_profiles(
     *,
     machine_profile: Any,
@@ -145,15 +170,17 @@ def from_profiles(
 
     validation = getattr(machine_profile, "validation_status", None)
     status = getattr(validation, "value", validation)
-    if status == ValidationStatus.unvalidated.value:
+    if status != ValidationStatus.validated.value:
+        reason = getattr(machine_profile, "validation_reason", None) or "This machine profile has not been validated on real hardware"
         raise InsufficientInformationError(
             f"The machine profile for {machine_profile.machine.vendor} "
-            f"{machine_profile.machine.model} has not been validated on real "
-            "hardware, so no G-code can be generated for it. Import or validate "
+            f"{machine_profile.machine.model} has not been validated ({reason}), "
+            "so no G-code can be generated for it. Import or validate "
             "a profile first.",
             details={
                 "machine_profile_id": str(machine_profile.id),
                 "validation_status": status,
+                "validation_reason": reason,
             },
         )
 

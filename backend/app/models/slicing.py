@@ -129,6 +129,16 @@ class SliceJob(Base, TimestampMixin):
     nozzle_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("nozzles.id", ondelete="RESTRICT"), nullable=False
     )
+    #: The AI print preparation attempt whose validated plan produced this job.
+    #: Nullable: a job created directly through `POST /slice` has no
+    #: preparation behind it. `SET NULL` rather than CASCADE so the toolpath
+    #: history outlives an attempt row.
+    preparation_job_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("print_preparation_jobs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    model_input_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     status: Mapped[JobStatus] = mapped_column(
         SAEnum(JobStatus, native_enum=False, length=16),

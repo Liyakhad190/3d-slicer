@@ -91,6 +91,12 @@ class MachineLimits:
     nozzle_diameter_mm: float = 0.4
     allowed_commands: frozenset[str] | None = None
     has_thermal_control: bool = True
+    safe_nozzle_min_c: float | None = None
+    safe_nozzle_max_c: float | None = None
+    first_layer_nozzle_min_c: float | None = None
+    first_layer_nozzle_max_c: float | None = None
+    material_nozzle_min_c: float | None = None
+    material_nozzle_max_c: float | None = None
     #: Where the machine's work volume starts.
     #:
     #: `corner` means the bed spans 0..build (stock Marlin/RepRap: the origin is
@@ -116,7 +122,7 @@ class MachineLimits:
 
     @classmethod
     def from_profile(
-        cls, profile: Any, *, nozzle_diameter_mm: float = 0.4
+        cls, profile: Any, *, nozzle_diameter_mm: float = 0.4, material_profile: Any = None
     ) -> "MachineLimits":
         build = profile.build_volume or {}
         temps = profile.temperature_limits or {}
@@ -127,6 +133,23 @@ class MachineLimits:
         # The coordinate frame is a machine-profile property, and the slicer
         # settings are derived from this same field, so the two cannot disagree.
         origin_convention = str((profile.machine_restrictions or {}).get("origin_convention", "corner"))
+
+        safe_min = None
+        safe_max = None
+        first_layer_min = None
+        first_layer_max = None
+        mat_min = None
+        mat_max = None
+        if material_profile is not None:
+            from app.slicing.temperature import resolve_safe_temperatures
+            tres = resolve_safe_temperatures(machine_profile=profile, material_profile=material_profile)
+            safe_min = tres.safe_min_c
+            safe_max = tres.safe_max_c
+            first_layer_min = tres.safe_min_c
+            first_layer_max = tres.safe_max_c
+            mat_min = tres.material_min_c
+            mat_max = tres.material_max_c
+
         if profile.gcode_dialect_id is not None:
             dialect = profile.gcode_dialect
             if dialect is not None:
@@ -170,6 +193,12 @@ class MachineLimits:
             nozzle_diameter_mm=nozzle_diameter_mm,
             allowed_commands=dialect_allowed,
             origin_convention=origin_convention,
+            safe_nozzle_min_c=safe_min,
+            safe_nozzle_max_c=safe_max,
+            first_layer_nozzle_min_c=first_layer_min,
+            first_layer_nozzle_max_c=first_layer_max,
+            material_nozzle_min_c=mat_min,
+            material_nozzle_max_c=mat_max,
         )
 
 
@@ -349,7 +378,7 @@ def validate_gcode(
                     if temp > limits.nozzle_max_c:
                         findings.append(
                             Finding(
-                                code="NOZZLE_TEMP_TOO_HIGH",
+                                code="GCODE_TEMPERATURE_OUT_OF_RANGE",
                                 severity="critical",
                                 message=(
                                     f"Nozzle target of {temp:.0f} C exceeds the machine limit "
@@ -360,6 +389,38 @@ def validate_gcode(
                                 limit_value=limits.nozzle_max_c,
                                 unit="C",
                                 mitigation="Lower the nozzle temperature for this machine.",
+                            )
+                        )
+                    elif limits.safe_nozzle_max_c is not None and temp > limits.safe_nozzle_max_c:
+                        findings.append(
+                            Finding(
+                                code="GCODE_TEMPERATURE_OUT_OF_RANGE",
+                                severity="critical",
+                                message=(
+                                    f"Nozzle target of {temp:.0f} C exceeds the validated safe maximum "
+                                    f"of {limits.safe_nozzle_max_c:.0f} C."
+                                ),
+                                line_number=line_number,
+                                measured_value=temp,
+                                limit_value=limits.safe_nozzle_max_c,
+                                unit="C",
+                                mitigation="Lower the nozzle temperature to stay within validated safe range.",
+                            )
+                        )
+                    elif limits.safe_nozzle_min_c is not None and temp < limits.safe_nozzle_min_c and temp > 0:
+                        findings.append(
+                            Finding(
+                                code="GCODE_TEMPERATURE_OUT_OF_RANGE",
+                                severity="critical",
+                                message=(
+                                    f"Nozzle target of {temp:.0f} C is below the validated safe minimum "
+                                    f"of {limits.safe_nozzle_min_c:.0f} C."
+                                ),
+                                line_number=line_number,
+                                measured_value=temp,
+                                limit_value=limits.safe_nozzle_min_c,
+                                unit="C",
+                                mitigation="Raise the nozzle temperature to ensure proper extrusion.",
                             )
                         )
                 else:

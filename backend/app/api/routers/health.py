@@ -88,6 +88,7 @@ def version() -> dict[str, Any]:
         "app": settings.app_name,
         "environment": settings.environment,
         "api_prefix": settings.api_prefix,
-        "ai_provider": settings.ai_provider,
+        "ai_provider": settings.llm_provider,
+        "ai_model": settings.ollama_model if settings.llm_provider == "ollama" else settings.ai_model,
         "debug": settings.debug,
     }

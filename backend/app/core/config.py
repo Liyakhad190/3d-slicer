@@ -8,11 +8,12 @@ value in a non-development environment (see ARCHITECTURE.md section 5).
 from __future__ import annotations
 
 import functools
+import json
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import Field, field_validator, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_DATA_DIR = REPO_ROOT / "data"
@@ -61,7 +62,9 @@ class Settings(BaseSettings):
     argon2_memory_cost_kib: int = 65_536
     argon2_parallelism: int = 4
 
-    cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])
+    cors_origins: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["http://localhost:5173"]
+    )
 
     # -- rate limiting ---------------------------------------------------------
     rate_limit_enabled: bool = True
@@ -85,12 +88,29 @@ class Settings(BaseSettings):
     slicer_max_output_bytes: int = 512 * 1024 * 1024
 
     # -- ai --------------------------------------------------------------------
-    ai_api_key: str | None = None
-    ai_provider: str = "disabled"  # disabled | openai_compatible
-    ai_base_url: str | None = None
+    # `ollama` is the default and needs no API key: it is a local process.
+    llm_provider: str = "ollama"
+    ollama_base_url: str = "http://localhost:11434"
+    ollama_model: str = "qwen2.5:1.5b"
+    ollama_keep_alive: str = "15m"
+    llm_timeout_seconds: int = 180
+    llm_num_predict: int = 512
+    llm_temperature: float = 0.0
+    #: One retry on a transport or schema failure. Beyond that the caller gets a
+    #: structured error; a weak local model must not stall a request.
+    llm_max_retries: int = 1
+    #: RAG
+    rag_enabled: bool = True
+    rag_max_documents: int = 6
+    #: Model-directed tool calling. Off by default: the planner assembles tool
+    #: context deterministically instead, which is both safer and far more
+    #: reliable on a small local model. See docs/AI_ARCHITECTURE.md.
+    llm_tool_calling_enabled: bool = False
+    #: Only read when `llm_provider = "openai"`. Empty by design: the default
+    #: path is a local Ollama and this platform ships no key in the repo.
+    ai_api_key: str = ""
+    ai_base_url: str = "https://api.openai.com/v1"
     ai_model: str = "gpt-4o-mini"
-    ai_timeout_seconds: int = 60
-    ai_max_tool_iterations: int = 12
 
     # -- observability ---------------------------------------------------------
     log_level: str = "INFO"
@@ -101,9 +121,28 @@ class Settings(BaseSettings):
     @field_validator("cors_origins", mode="before")
     @classmethod
     def _split_origins(cls, value: object) -> object:
-        if isinstance(value, str):
-            return [item.strip() for item in value.split(",") if item.strip()]
-        return value
+        """Accept a comma-separated list, which is how people write this.
+
+        The `NoDecode` annotation on the field is what makes this reachable.
+        Without it, pydantic-settings JSON-decodes the raw value first and
+        raises on the documented `CORS_ORIGINS=http://localhost:5173`, because
+        a bare origin is not valid JSON — which meant the README's own quick
+        start produced a `.env` the app refused to start with. A JSON array is
+        still honoured, since deployment tooling tends to emit one.
+        """
+        if not isinstance(value, str):
+            return value
+        text = value.strip()
+        if text.startswith("["):
+            try:
+                decoded = json.loads(text)
+            except ValueError:
+                # Not JSON after all; fall through and treat it as a list.
+                pass
+            else:
+                if isinstance(decoded, list):
+                    return [str(item) for item in decoded]
+        return [item.strip() for item in text.split(",") if item.strip()]
 
     @field_validator("data_dir", mode="after")
     @classmethod
@@ -155,11 +194,20 @@ class Settings(BaseSettings):
                 problems.append("AUTH_SECRET must be at least 32 characters in production.")
             if self.debug:
                 problems.append("DEBUG must be false in production.")
-            if self.ai_api_key is None and self.ai_provider != "disabled":
-                problems.append("AI_API_KEY is required unless AI_PROVIDER=disabled.")
         if self.is_production and not self.is_sqlite:
             if self.db_pool_size < 5:
                 problems.append("DB_POOL_SIZE is too small for production traffic.")
+        if self.llm_provider not in {"ollama", "openai"}:
+            problems.append(
+                f"LLM_PROVIDER {self.llm_provider!r} is not a known provider. "
+                "Supported: ollama, openai."
+            )
+        if self.llm_provider == "openai" and not self.ai_api_key:
+            problems.append("AI_API_KEY is required when LLM_PROVIDER=openai.")
+        if not self.ollama_base_url.startswith(("http://", "https://")):
+            problems.append("OLLAMA_BASE_URL must be an http(s) URL.")
+        if not self.ollama_model.strip():
+            problems.append("OLLAMA_MODEL must not be empty.")
         return problems
 
 

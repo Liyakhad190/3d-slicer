@@ -31,15 +31,21 @@ export default function Login({
   }
 
   return (
-    <div className="flex h-full items-center justify-center p-6">
-      <div className="w-full max-w-sm">
-        <div className="panel p-6">
-          <h1 className="text-lg font-semibold text-slate-100">AI Slicing Platform</h1>
-          <p className="mt-1 text-xs text-slate-500">
-            Upload a model, pick a printer, get a validated toolpath.
+    <div className="login-page flex min-h-full items-center justify-center p-5 sm:p-8">
+      <div className="login-card panel w-full max-w-sm p-6 sm:p-8">
+          <div className="mb-7 flex items-center gap-3">
+            <span className="brand-mark" aria-hidden="true">S</span>
+            <div>
+              <p className="text-[10px] font-semibold uppercase text-slate-500">FDM workspace</p>
+              <h1 className="text-lg font-semibold text-slate-100">AI Slicing Platform</h1>
+            </div>
+          </div>
+          <p className="mb-1 text-xl font-semibold text-slate-100">
+            {mode === 'login' ? 'Welcome back' : 'Create your account'}
           </p>
+          <p className="text-xs text-slate-500">{mode === 'login' ? 'Sign in to continue.' : 'Register to create a workspace.'}</p>
 
-          <form onSubmit={submit} className="mt-6 space-y-3">
+          <form onSubmit={submit} className="mt-6 space-y-4">
             {mode === 'register' && (
               <div>
                 <label className="field-label" htmlFor="name">
@@ -91,7 +97,7 @@ export default function Login({
             </div>
 
             {error && (
-              <p className="rounded bg-rose-950/60 px-3 py-2 text-xs text-rose-300">{error}</p>
+              <p className="rounded border border-slate-800 bg-slate-100 px-3 py-2 text-xs text-slate-900">{error}</p>
             )}
 
             <button type="submit" disabled={busy} className="btn-primary w-full">
@@ -102,12 +108,11 @@ export default function Login({
           <button
             type="button"
             onClick={() => setMode(mode === 'login' ? 'register' : 'login')}
-            className="mt-4 w-full text-center text-xs text-slate-500 hover:text-slate-300"
+            className="mt-5 w-full text-center text-xs text-slate-500 hover:text-slate-300"
           >
             {mode === 'login' ? 'Need an account? Register' : 'Have an account? Sign in'}
           </button>
         </div>
-      </div>
     </div>
   )
 }

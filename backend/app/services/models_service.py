@@ -14,7 +14,7 @@ from decimal import Decimal
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.core.errors import NotFoundError, PayloadTooLargeError
+from app.core.errors import NotFoundError, PayloadTooLargeError, ValidationFailedError
 from app.core.logging import get_logger
 from app.core.validation import sanitize_filename
 from app.models.assets import Blob, Model, ModelAnalysis, ModelVersion
@@ -171,7 +171,7 @@ def run_analysis(
     unless `force` is set. The analysis itself is computed on a temp file
     because trimesh needs a path for the fancier format readers.
     """
-    blob = db.get(Blob, version.blob_id)
+    blob = active_blob(db, version)
     if blob is None:  # pragma: no cover - FK guarantees presence
         raise NotFoundError("The stored model file could not be located.")
 
@@ -233,6 +233,107 @@ def run_analysis(
         duration_ms=report.duration_ms,
     )
     return report
+
+
+def active_blob(db: Session, version: ModelVersion) -> Blob:
+    """Return the authoritative geometry, without changing the source upload."""
+    blob_id = version.transformed_blob_id or version.blob_id
+    blob = db.get(Blob, blob_id)
+    if blob is None:  # pragma: no cover - foreign key protects persisted ids
+        raise NotFoundError("The stored model file could not be located.")
+    return blob
+
+
+def transform_model(
+    db: Session,
+    *,
+    version: ModelVersion,
+    scale_percent: dict[str, float] | None = None,
+    target_dimensions_mm: dict[str, float] | None = None,
+    preserve_aspect_ratio: bool = False,
+) -> MeshAnalysisReport:
+    """Scale the active mesh, persist its bytes, and analyse those exact bytes."""
+    import io
+
+    import numpy as np
+    import trimesh
+
+    source = db.get(Blob, version.blob_id)
+    if source is None:  # pragma: no cover - foreign key protects persisted ids
+        raise NotFoundError("The stored model file could not be located.")
+    file_type = _TRIMESH_FILE_TYPE.get(ModelFormat(source.detected_format))
+    if file_type is None:
+        raise ValidationFailedError("This model format cannot be transformed as triangle geometry.")
+
+    loaded = trimesh.load(
+        io.BytesIO(storage.read_blob(source)), force="mesh", process=False, file_type=file_type
+    )
+    if isinstance(loaded, trimesh.Scene):
+        meshes = [geometry for geometry in loaded.geometry.values() if isinstance(geometry, trimesh.Trimesh)]
+        if not meshes:
+            raise ValidationFailedError("The model contains no triangle geometry to transform.")
+        loaded = trimesh.util.concatenate(meshes)
+    if not isinstance(loaded, trimesh.Trimesh) or len(loaded.vertices) == 0:
+        raise ValidationFailedError("The model contains no triangle geometry to transform.")
+
+    current_dimensions = np.asarray(loaded.extents, dtype=float)
+    if not np.isfinite(current_dimensions).all() or np.any(current_dimensions <= 0):
+        raise ValidationFailedError("The model has invalid dimensions and cannot be scaled.")
+
+    if target_dimensions_mm is not None:
+        factors = np.asarray(
+            [target_dimensions_mm[axis] / current_dimensions[index]
+             for index, axis in enumerate(("x", "y", "z"))],
+            dtype=float,
+        )
+        mode = "target_dimensions_mm"
+        requested: dict[str, Any] = {axis: target_dimensions_mm[axis] for axis in ("x", "y", "z")}
+    else:
+        percentages = scale_percent or {"x": 100.0, "y": 100.0, "z": 100.0}
+        factors = np.asarray([percentages[axis] / 100 for axis in ("x", "y", "z")])
+        mode = "scale_percent"
+        requested = {axis: percentages[axis] for axis in ("x", "y", "z")}
+
+    if preserve_aspect_ratio and not np.allclose(factors, factors[0], rtol=1e-6, atol=1e-8):
+        from app.core.errors import ValidationFailedError
+
+        raise ValidationFailedError(
+            "Aspect-ratio lock requires the same scale on X, Y and Z.",
+            details={"scale_factors": factors.tolist()},
+        )
+
+    loaded.apply_scale(factors)
+    payload = loaded.export(file_type="stl")
+    data = payload.encode("utf-8") if isinstance(payload, str) else payload
+    transformed, _ = storage.put_blob(
+        data,
+        media_type="model/stl",
+        detected_format=ModelFormat.stl_binary.value,
+        session=db,
+    )
+
+    version.transformed_blob_id = transformed.id
+    version.transformation = {
+        "source_sha256": db.get(Blob, version.blob_id).sha256,
+        "transformed_sha256": transformed.sha256,
+        "scale_factors": {
+            axis: float(factors[index]) for index, axis in enumerate(("x", "y", "z"))
+        },
+        "last_operation": {"mode": mode, "requested": requested,
+                           "preserve_aspect_ratio": preserve_aspect_ratio},
+    }
+    version.analysis_status = "pending"
+    db.flush()
+    return run_analysis(db, version=version, force=True)
+
+
+def reset_transformation(db: Session, *, version: ModelVersion) -> MeshAnalysisReport:
+    """Restore the original upload as active geometry and remeasure it."""
+    version.transformed_blob_id = None
+    version.transformation = None
+    version.analysis_status = "pending"
+    db.flush()
+    return run_analysis(db, version=version, force=True)
 
 
 def _report_from_row(row: ModelAnalysis) -> MeshAnalysisReport:

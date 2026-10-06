@@ -17,14 +17,13 @@ from sqlalchemy.orm import selectinload
 from app.api.deps import CurrentUser, DbSession, owned_job, owned_printer
 from app.core.errors import ConflictError, InsufficientInformationError, NotFoundError
 from app.core.logging import get_logger
-from app.models.assets import Blob
-from app.models.catalog import MachineProfile, MaterialProfile, Nozzle
+from app.models.assets import Blob, ModelVersion
+from app.models.catalog import MachineProfile, MaterialProfile
 from app.models.identity import AuditLog
 from app.models.slicing import (
     GeneratedFile,
     JobEvent,
     JobStageRun,
-    JobStatus,
     SliceJob,
     ValidationFinding,
     ValidationResult,
@@ -36,6 +35,8 @@ from app.schemas.api import (
     SliceJobResponse,
 )
 from app.services import models_service, storage
+from app.slicing.configuration import canonical_parameter_overrides
+from app.slicing.job_factory import create_slice_job
 from app.slicing.pipeline import run_pipeline
 from app.slicing.registry import get_registry, get_technology_registry
 from app.slicing.toolpath import parse_toolpath
@@ -77,32 +78,14 @@ def create_slice(
     if machine_profile is None:  # pragma: no cover - FK guarantees presence
         raise NotFoundError("The printer's machine profile does not exist.")
 
-    nozzle = db.execute(
-        select(Nozzle).where(
-            Nozzle.diameter_mm == printer.nozzle_diameter_mm,
-            Nozzle.material == printer.nozzle_material,
-        )
-    ).scalars().first()
-    if nozzle is None:
-        # Fall back to any nozzle of that diameter so the job is still runnable
-        # and the mismatch is visible rather than blocking the request.
-        nozzle = db.execute(
-            select(Nozzle).where(Nozzle.diameter_mm == printer.nozzle_diameter_mm)
-        ).scalars().first()
-    if nozzle is None:
-        raise NotFoundError("No nozzle record exists for this printer's nozzle diameter.")
-
-    job = SliceJob(
+    job = create_slice_job(
+        db,
         user_id=user.id,
-        model_version_id=version.id,
-        printer_id=printer.id,
-        machine_profile_id=machine_profile.id,
-        material_profile_id=material_profile.id,
-        nozzle_id=nozzle.id,
-        status=JobStatus.queued,
+        version=version,
+        printer=printer,
+        material_profile=material_profile,
+        machine_profile=machine_profile,
     )
-    db.add(job)
-    db.flush()
 
     db.add(
         AuditLog(
@@ -119,11 +102,14 @@ def create_slice(
         )
     )
 
-    locked = {
-        key: value
-        for key, value in (payload.engine_settings_overrides or {}).items()
-        if key in set(payload.locked_parameters or [])
-    }
+    overrides = canonical_parameter_overrides(payload.engine_settings_overrides or {})
+    locked = canonical_parameter_overrides(
+        {
+            key: value
+            for key, value in (payload.engine_settings_overrides or {}).items()
+            if key in set(payload.locked_parameters or [])
+        }
+    )
     run_pipeline(
         db,
         job=job,
@@ -132,6 +118,7 @@ def create_slice(
         material_profile=material_profile,
         objective=payload.objective,
         locked=locked,
+        overrides=overrides,
     )
     db.flush()
     return SliceJobResponse.model_validate(job)
@@ -246,6 +233,9 @@ def job_validation(job_id: uuid.UUID, db: DbSession, user: CurrentUser) -> dict[
 )
 def job_files(job_id: uuid.UUID, db: DbSession, user: CurrentUser) -> list[GeneratedFileResponse]:
     job = owned_job(db, user, job_id)
+    version = db.get(ModelVersion, job.model_version_id)
+    if version is None or job.model_input_sha256 != models_service.active_blob(db, version).sha256:
+        return []
     rows = db.execute(
         select(GeneratedFile).where(GeneratedFile.slice_job_id == job.id)
     ).scalars()
@@ -261,6 +251,12 @@ def download_file(
     job_id: uuid.UUID, file_id: uuid.UUID, db: DbSession, user: CurrentUser
 ) -> Response:
     job = owned_job(db, user, job_id)
+    version = db.get(ModelVersion, job.model_version_id)
+    if version is None or job.model_input_sha256 != models_service.active_blob(db, version).sha256:
+        raise ConflictError(
+            "The model changed after this slice was generated; its artifact is stale.",
+            code="SLICE_ARTIFACT_STALE",
+        )
     generated = db.execute(
         select(GeneratedFile).where(
             GeneratedFile.id == file_id, GeneratedFile.slice_job_id == job.id
@@ -298,6 +294,12 @@ def job_toolpath(
     job_id: uuid.UUID, db: DbSession, user: CurrentUser, max_segments: int = Query(60_000, ge=100, le=400_000)
 ) -> dict[str, Any]:
     job = owned_job(db, user, job_id)
+    version = db.get(ModelVersion, job.model_version_id)
+    if version is None or job.model_input_sha256 != models_service.active_blob(db, version).sha256:
+        raise ConflictError(
+            "The model changed after this slice was generated; its toolpath is stale.",
+            code="SLICE_ARTIFACT_STALE",
+        )
     generated = db.execute(
         select(GeneratedFile)
         .where(GeneratedFile.slice_job_id == job.id, GeneratedFile.kind == "gcode")
@@ -307,7 +309,7 @@ def job_toolpath(
         raise NotFoundError("This job has not produced any G-code yet.")
 
     machine_profile = db.get(MachineProfile, job.machine_profile_id)
-    printer = owned_printer(db, user, job.printer_id)
+    printer = owned_printer(db, user, job.printer_id, include_archived=True)
     limits = MachineLimits.from_profile(
         machine_profile, nozzle_diameter_mm=float(printer.nozzle_diameter_mm)
     )

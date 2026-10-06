@@ -124,3 +124,21 @@ class ExternalToolError(AppError):
     code = "EXTERNAL_TOOL_FAILED"
     http_status = status.HTTP_500_INTERNAL_SERVER_ERROR
     message = "An external tool failed to complete."
+
+
+class LLMServiceError(AppError):
+    """The reasoning layer could not produce a usable answer.
+
+    Its `code` is the provider's own code (`LLM_UNAVAILABLE`, `LLM_TIMEOUT`,
+    `LLM_INVALID_OUTPUT`, ...) rather than a generic one, because the frontend
+    branches on it to show the right remedy. `details` carries the hint.
+
+    Raised instead of `HTTPException` on purpose: the app's HTTP exception
+    handler flattens `detail` into a string and would discard both the code and
+    the hint, leaving the caller unable to tell "start Ollama" apart from
+    "rephrase your request".
+    """
+
+    code = "LLM_PROVIDER_ERROR"
+    http_status = status.HTTP_503_SERVICE_UNAVAILABLE
+    message = "The language model service could not produce a plan."

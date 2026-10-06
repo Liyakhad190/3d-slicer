@@ -1,0 +1,156 @@
+import { useEffect, useState } from 'react'
+import { api, getToken, type User } from '../lib/api'
+
+export default function Settings({ user, onSignOut }: { user: User; onSignOut: () => void }): JSX.Element {
+  const [token] = useState(() => getToken() ?? '')
+  const [copied, setCopied] = useState(false)
+  const [printers, setPrinters] = useState<{ id: string; name: string; nozzle_diameter_mm: string }[]>([])
+  const [deleteMsg, setDeleteMsg] = useState<string | null>(null)
+
+  useEffect(() => {
+    void api.printers().then(setPrinters).catch(() => null)
+  }, [deleteMsg])
+
+  function copyToken(): void {
+    void navigator.clipboard.writeText(token).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    })
+  }
+
+  async function deletePrinter(id: string, name: string): Promise<void> {
+    // backend doesn't yet have DELETE /printers/:id, so we show the ID
+    // so the user can reference it. When the endpoint exists, swap this out.
+    setDeleteMsg(`To remove "${name}" contact your admin (id: ${id.slice(0, 8)}).`)
+  }
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h1 className="text-xl font-semibold text-slate-100">Settings</h1>
+        <p className="mt-1 text-sm text-slate-500">Account and platform configuration.</p>
+      </div>
+
+      {/* Account */}
+      <section className="panel">
+        <h2 className="panel-title">Account</h2>
+        <div className="space-y-4 p-4">
+          <dl className="space-y-2 text-sm">
+            <Row label="Name" value={user.display_name} />
+            <Row label="Email" value={user.email} />
+            <Row label="Role" value={user.role} />
+            <Row
+              label="Member since"
+              value={new Date(user.created_at).toLocaleDateString(undefined, {
+                year: 'numeric', month: 'long', day: 'numeric',
+              })}
+            />
+          </dl>
+          <button
+            type="button"
+            onClick={onSignOut}
+            className="rounded border border-rose-800/60 bg-rose-950/30 px-4 py-2 text-xs
+                       font-medium text-rose-400 hover:bg-rose-950/60"
+          >
+            Sign out
+          </button>
+        </div>
+      </section>
+
+      {/* API token */}
+      <section className="panel">
+        <h2 className="panel-title">API access token</h2>
+        <div className="space-y-2 p-4">
+          <p className="text-xs text-slate-500">
+            Use this token in the <code className="text-slate-400">Authorization: Bearer …</code> header
+            to call the API directly (e.g. from a script or CI pipeline).
+          </p>
+          <div className="flex gap-2">
+            <input
+              type="password"
+              readOnly
+              value={token}
+              className="input flex-1 font-mono text-xs"
+            />
+            <button
+              type="button"
+              onClick={copyToken}
+              className="rounded bg-slate-800 px-3 py-2 text-xs text-slate-300 hover:bg-slate-700"
+            >
+              {copied ? '✓ Copied' : 'Copy'}
+            </button>
+          </div>
+          <p className="text-[10px] text-slate-600">
+            This token is stored in your browser's localStorage and is valid until it expires.
+          </p>
+        </div>
+      </section>
+
+      {/* Registered printers */}
+      <section className="panel">
+        <h2 className="panel-title">Your printers</h2>
+        <div className="p-4">
+          {printers.length === 0 ? (
+            <p className="text-xs text-slate-500">
+              No printers registered.{' '}
+              <a href="/printers" className="text-sky-400 hover:underline">
+                Add one on the Printers page.
+              </a>
+            </p>
+          ) : (
+            <ul className="divide-y divide-slate-800">
+              {printers.map((p) => (
+                <li key={p.id} className="flex items-center gap-3 py-2.5 text-xs">
+                  <span className="text-slate-300">{p.name}</span>
+                  <span className="rounded bg-slate-800 px-1.5 py-0.5 font-mono text-slate-500">
+                    {p.nozzle_diameter_mm} mm
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => void deletePrinter(p.id, p.name)}
+                    className="ml-auto text-slate-600 hover:text-rose-400"
+                  >
+                    remove
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          {deleteMsg && (
+            <p className="mt-2 rounded bg-slate-900 px-3 py-2 text-[11px] text-amber-400">
+              {deleteMsg}
+            </p>
+          )}
+        </div>
+      </section>
+
+      {/* Platform info */}
+      <section className="panel">
+        <h2 className="panel-title">Platform</h2>
+        <div className="space-y-2 p-4 text-xs text-slate-500">
+          <p>
+            G-code is generated by CuraEngine (AGPL-3.0), executed in a sandboxed child process.
+            AI suggestions are validated by the deterministic backend before any parameter is applied.
+          </p>
+          <p>
+            <span className="font-medium text-slate-400">Temperature hierarchy:</span>{' '}
+            Printer hard limits → material limits → slicer constraints → calibration → manufacturer
+            recommendation → AI suggestion → user preference.
+          </p>
+          <p className="text-[10px] text-slate-700">
+            The LLM may propose. The deterministic backend validates and decides.
+          </p>
+        </div>
+      </section>
+    </div>
+  )
+}
+
+function Row({ label, value }: { label: string; value: string }): JSX.Element {
+  return (
+    <div className="flex items-start gap-3">
+      <dt className="w-32 shrink-0 text-slate-500">{label}</dt>
+      <dd className="text-slate-200">{value}</dd>
+    </div>
+  )
+}

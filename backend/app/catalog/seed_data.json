@@ -11,7 +11,10 @@
     "limits, start/end G-code and speed ceilings against the real machine, then sets",
     "validation_status = 'validated' with validated_at/validated_by. A change to any",
     "value here creates a NEW profile_version; existing rows are never edited, so a",
-    "previously generated job keeps referring to the profile it actually ran with."
+    "previously generated job keeps referring to the profile it actually ran with.",
+    "machine_restrictions.output_formats lists which file formats a machine may",
+    "be offered for download: a format appears only when the profile declares it",
+    "AND this deployment can actually produce it (default: gcode)."
   ],
   "gcode_dialects": [
     {
@@ -384,6 +387,7 @@
         },
         "max_volumetric_flow_mm3s": 8.0,
         "machine_restrictions": {
+          "output_formats": ["gcode"],
           "direct_drive_only_materials": ["tpu95a", "nylon", "pc", "pa-cf", "pa6-gf"],
           "no_abrasive_filament_with_brass_path": true,
           "z_axis_needs_homing_before_print": true
@@ -424,6 +428,7 @@
         },
         "max_volumetric_flow_mm3s": 24.0,
         "machine_restrictions": {
+          "output_formats": ["gcode"],
           "direct_drive_only_materials": [],
           "no_abrasive_filament_with_brass_path": true
         },
@@ -464,6 +469,7 @@
         },
         "max_volumetric_flow_mm3s": 21.0,
         "machine_restrictions": {
+          "output_formats": ["gcode"],
           "direct_drive_only_materials": [],
           "no_abrasive_filament_with_brass_path": true
         },
@@ -503,6 +509,7 @@
         },
         "max_volumetric_flow_mm3s": 21.0,
         "machine_restrictions": {
+          "output_formats": ["gcode"],
           "direct_drive_only_materials": [],
           "no_abrasive_filament_with_brass_path": true
         },
@@ -543,6 +550,7 @@
         },
         "max_volumetric_flow_mm3s": 30.0,
         "machine_restrictions": {
+          "output_formats": ["gcode"],
           "direct_drive_only_materials": [],
           "no_abrasive_filament_with_brass_path": true
         },

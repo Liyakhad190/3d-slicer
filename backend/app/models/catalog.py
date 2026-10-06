@@ -58,6 +58,9 @@ class ProfileStatus(str, enum.Enum):
 class ValidationStatus(str, enum.Enum):
     unvalidated = "unvalidated"
     validated = "validated"
+    custom = "custom"
+    unsupported = "unsupported"
+    invalid = "invalid"
     rejected = "rejected"
 
 
@@ -142,6 +145,10 @@ class MachineProfile(Base):
     )
     validated_at: Mapped[datetime | None] = mapped_column(TZDateTime, nullable=True)
     validated_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    validation_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    provenance: Mapped[str] = mapped_column(
+        String(40), default="seed", server_default="seed", nullable=False
+    )
     profile_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     changelog: Mapped[str | None] = mapped_column(Text, nullable=True)
 
@@ -176,6 +183,16 @@ class MachineProfile(Base):
     gcode_dialect: Mapped["GcodeDialect | None"] = relationship(
         "GcodeDialect", lazy="joined"
     )
+
+    @property
+    def default_nozzle_diameter_mm(self) -> float:
+        """Determined from verified profile nozzle list; 0.4 if supported, else first."""
+        if not self.nozzle_diameters:
+            return 0.4
+        for d in self.nozzle_diameters:
+            if abs(float(d) - 0.4) < 1e-4:
+                return float(d)
+        return float(self.nozzle_diameters[0])
 
 
 class Nozzle(Base, TimestampMixin):
@@ -213,6 +230,7 @@ class Printer(Base, TimestampMixin):
     serial: Mapped[str | None] = mapped_column(String(80), nullable=True)
     is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    archived_at: Mapped[datetime | None] = mapped_column(TZDateTime, nullable=True, index=True)
 
 
 class Material(Base, TimestampMixin):

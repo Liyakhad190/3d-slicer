@@ -98,6 +98,10 @@ class ModelVersion(Base, TimestampMixin):
     repaired_blob_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("blobs.id", ondelete="SET NULL"), nullable=True
     )
+    transformed_blob_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("blobs.id", ondelete="SET NULL"), nullable=True
+    )
+    transformation: Mapped[dict[str, Any] | None] = mapped_column(JSONType, nullable=True)
 
     format: Mapped[str] = mapped_column(String(32), nullable=False)
     byte_size: Mapped[int] = mapped_column(BigInteger, nullable=False)

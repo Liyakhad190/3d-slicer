@@ -121,3 +121,73 @@ def _session_headers(test_client) -> dict[str, str]:
 
 def fixture_bytes(name: str) -> bytes:
     return (FIXTURES / name).read_bytes()
+
+# ---------------------------------------------------------------------------
+# Shared preparation workspace helpers (used across multiple test modules)
+# ---------------------------------------------------------------------------
+
+import pytest as _pytest
+from types import SimpleNamespace
+from pathlib import Path
+
+_FIXTURES_PATH = Path(__file__).parent / "fixtures"
+
+
+def _material_profile_id(seeded):
+    return next(
+        p["id"]
+        for p in seeded["material_profiles"].values()
+        if p["brand_sku"] == "pla-generic"
+    )
+
+
+def _workspace_on(client, headers, seeded, machine_profile_id):
+    material_id = _material_profile_id(seeded)
+    printer = client.post(
+        "/api/v1/printers",
+        headers=headers,
+        json={
+            "name": "Prep Printer",
+            "machine_profile_id": machine_profile_id,
+            "nozzle_diameter_mm": 0.4,
+            "nozzle_material": "brass",
+        },
+    )
+    assert printer.status_code == 201, printer.text
+    upload = client.post(
+        "/api/v1/models",
+        headers=headers,
+        files={
+            "file": (
+                "cube.stl",
+                (_FIXTURES_PATH / "cube_20mm.stl").read_bytes(),
+                "application/octet-stream",
+            )
+        },
+    )
+    assert upload.status_code == 201, upload.text
+    return SimpleNamespace(
+        headers=headers,
+        printer_id=printer.json()["id"],
+        version_id=upload.json()["version"]["id"],
+        material_profile_id=material_id,
+        machine_profile_id=machine_profile_id,
+    )
+
+
+@_pytest.fixture
+def workspace(client, fresh_headers, seeded):
+    profile_id = next(iter(seeded["profiles"]))
+    return _workspace_on(client, fresh_headers, seeded, profile_id)
+
+
+@_pytest.fixture
+def provider(monkeypatch):
+    from app.api.routers import preparation as preparation_router
+    from tests.job_factory import ScriptedProvider
+
+    scripted = ScriptedProvider(payloads=[{}, {}, {}])
+    monkeypatch.setattr(
+        preparation_router, "get_llm_provider", lambda settings=None: scripted
+    )
+    return scripted

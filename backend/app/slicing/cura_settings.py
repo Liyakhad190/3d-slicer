@@ -60,7 +60,52 @@ SETTING_MAP: dict[str, str] = {
     "support_angle_deg": "support_angle",
     "start_gcode": "machine_start_gcode",
     "end_gcode": "machine_end_gcode",
+    # --- override keys the print plan resolves to directly -------------------
+    # Every one of these was confirmed present in fdmprinter.def.json (Cura
+    # 5.13) before it was mapped; unknown keys are dropped by the adapter, so
+    # a guessed name would silently do nothing.
+    "first_layer_speed_mm_s": "speed_layer_0",
+    "first_layer_temperature_c": "material_print_temperature_layer_0",
+    "first_layer_bed_temperature_c": "material_bed_temperature_layer_0",
+    "first_layer_fan_percent": "cool_fan_speed_0",
+    "outer_wall_speed_mm_s": "speed_wall_0",
+    "inner_wall_speed_mm_s": "speed_wall_x",
+    "infill_speed_mm_s": "speed_infill",
+    "support_speed_mm_s": "speed_support",
+    "wall_acceleration_mm_s2": "acceleration_wall",
+    "travel_acceleration_mm_s2": "acceleration_travel",
+    "brim_width_mm": "brim_width",
+    "min_layer_time_s": "cool_min_layer_time",
+    "z_hop_mm": "retraction_hop",
+    "support_density_percent": "support_infill_rate",
+    "support_pattern": "support_pattern",
+    "support_interface_enable": "support_interface_enable",
+    "support_interface_height_mm": "support_interface_height",
+    "support_interface_density_percent": "support_interface_density",
+    "top_layers": "top_layers",
+    "bottom_layers": "bottom_layers",
 }
+
+#: Override keys whose value is bounded by a machine rating rather than by the
+#: setting's own range. Only *new* keys are listed: the clamps that already
+#: existed are left exactly as they were, because existing behaviour is
+#: covered by the test suite.
+_SPEED_OVERRIDE_KEYS = (
+    "first_layer_speed_mm_s",
+    "outer_wall_speed_mm_s",
+    "inner_wall_speed_mm_s",
+    "infill_speed_mm_s",
+    "support_speed_mm_s",
+)
+_ACCEL_OVERRIDE_KEYS = (
+    "wall_acceleration_mm_s2",
+    "travel_acceleration_mm_s2",
+)
+_PERCENT_OVERRIDE_KEYS = (
+    "first_layer_fan_percent",
+    "support_density_percent",
+    "support_interface_density_percent",
+)
 
 #: Our adhesion names -> Cura's.
 _ADHESION_MAP: dict[str, str] = {
@@ -185,8 +230,43 @@ def to_cura_settings(
             settings[cura_key] = min(float(value), limits.bed_max_c or float(value))
         elif our_key == "cooling_fan_percent":
             settings[cura_key] = max(0.0, min(100.0, float(value)))
+        elif our_key in _SPEED_OVERRIDE_KEYS:
+            settings[cura_key] = min(
+                float(value), limits.max_print_speed_mm_s or float(value)
+            )
+        elif our_key in _ACCEL_OVERRIDE_KEYS:
+            settings[cura_key] = min(
+                float(value), limits.max_acceleration_mm_s2 or float(value)
+            )
+        elif our_key in _PERCENT_OVERRIDE_KEYS:
+            settings[cura_key] = max(0.0, min(100.0, float(value)))
+        elif our_key == "first_layer_temperature_c":
+            settings[cura_key] = min(float(value), limits.nozzle_max_c or float(value))
+        elif our_key == "first_layer_bed_temperature_c":
+            settings[cura_key] = min(float(value), limits.bed_max_c or float(value))
+        elif our_key == "brim_width_mm":
+            settings[cura_key] = max(0.0, float(value))
+        elif our_key == "min_layer_time_s":
+            settings[cura_key] = max(0.0, float(value))
+        elif our_key == "support_interface_height_mm":
+            settings[cura_key] = max(0.0, float(value))
+        elif our_key == "z_hop_mm":
+            hop = max(0.0, float(value))
+            settings[cura_key] = hop
+            # Cura ignores the distance unless the feature is switched on; a
+            # plan that asks for a hop without the flag would change nothing.
+            settings["retraction_hop_enabled"] = hop > 0.0
         else:
             settings[cura_key] = value
+
+    # `first_layer_line_width_mm` is a distance, Cura's control is a factor of
+    # the overall line width. Dividing here keeps the conversion next to the
+    # mapping instead of leaking a Cura unit into the plan vocabulary.
+    first_layer_line_width = parameters.get("first_layer_line_width_mm")
+    if first_layer_line_width is not None and line_width > 0:
+        settings["initial_layer_line_width_factor"] = round(
+            max(0.0, float(first_layer_line_width)) * 100.0 / line_width, 3
+        )
 
     # `retraction` is a dict in our schema and two scalars in Cura's.
     retraction = parameters.get("retraction")

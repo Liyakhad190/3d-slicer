@@ -7,12 +7,13 @@ edge instead of reaching the slicer.
 
 from __future__ import annotations
 
+import math
 import uuid
 from datetime import datetime
 from decimal import Decimal
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 
 class ErrorBody(BaseModel):
@@ -92,6 +93,8 @@ class ModelVersionResponse(BaseModel):
     format: str
     byte_size: int
     sha256: str
+    transformed_blob_id: uuid.UUID | None = None
+    transformation: dict[str, Any] | None = None
     analysis_status: str
     repair_status: str
     triangle_count: int | None
@@ -107,6 +110,59 @@ class UploadResponse(BaseModel):
     deduplicated: bool = Field(
         description="True when an identical file was already stored; no new bytes were written."
     )
+
+
+#: Largest accepted multiplier, as a percentage. 1e6% is a 10,000x scale, which
+#: is what recovering a model exported in *meters* needs: the smallest model the
+#: platform will scale is bounded by the millimetre guard below, so a model at
+#: the 0.01 mm floor still reaches a 250 mm bed at this ceiling. Anything beyond
+#: that is a unit mistake, not a scale the user meant.
+MAX_SCALE_PERCENT = 1_000_000.0
+
+#: Largest accepted target edge, in millimetres. 10 m is far beyond any build
+#: volume, so it bounds a typo rather than a legitimate print.
+MAX_TARGET_DIMENSION_MM = 10_000.0
+
+#: Smallest accepted value. Dimensions and factors are float64 all the way down,
+#: but below this the geometry is degenerate for printing and almost always a
+#: unit error (microns, metres, inches), which the recovery paths exist to fix.
+MIN_TRANSFORM_VALUE = 0.01
+
+
+class ModelTransformRequest(BaseModel):
+    scale_percent: dict[str, float] | None = None
+    target_dimensions_mm: dict[str, float] | None = None
+    preserve_aspect_ratio: bool = False
+    reset: bool = False
+
+    @model_validator(mode="after")
+    def validate_transform(self) -> "ModelTransformRequest":
+        if self.reset:
+            if self.scale_percent is not None or self.target_dimensions_mm is not None:
+                raise ValueError("Reset cannot be combined with scale values.")
+            return self
+        if (self.scale_percent is None) == (self.target_dimensions_mm is None):
+            raise ValueError("Provide either scale_percent or target_dimensions_mm.")
+        # The two modes carry different units, so each is bounded by what its own
+        # unit can physically mean. One shared number silently caps percentages
+        # far below what a meters-exported model needs to reach a build volume.
+        for values, ceiling, label in (
+            (self.scale_percent, MAX_SCALE_PERCENT, "Scale percentages"),
+            (self.target_dimensions_mm, MAX_TARGET_DIMENSION_MM, "Target dimensions"),
+        ):
+            if values is None:
+                continue
+            if set(values) != {"x", "y", "z"}:
+                raise ValueError("Scale values must include X, Y and Z.")
+            for axis, value in values.items():
+                if not math.isfinite(value):
+                    raise ValueError(f"{label} must be finite ({axis} was {value}).")
+                if not MIN_TRANSFORM_VALUE <= value <= ceiling:
+                    raise ValueError(
+                        f"{label} must be between {MIN_TRANSFORM_VALUE:g} and "
+                        f"{ceiling:g} ({axis} was {value:g})."
+                    )
+        return self
 
 
 class FindingResponse(BaseModel):
@@ -134,6 +190,12 @@ class AnalysisResponse(BaseModel):
     duration_ms: int
 
 
+class ModelTransformResponse(BaseModel):
+    version: ModelVersionResponse
+    analysis: AnalysisResponse
+    dimensions_mm: dict[str, float]
+
+
 # --------------------------------------------------------------------------- #
 # catalog
 # --------------------------------------------------------------------------- #
@@ -147,8 +209,11 @@ class MachineProfileResponse(BaseModel):
     profile_version: int
     status: str
     validation_status: str
+    validation_reason: str | None = None
+    provenance: str | None = "seed"
     build_volume: dict[str, Any]
     nozzle_diameters: list[Any]
+    default_nozzle_diameter_mm: float = 0.4
     extruders: int
     temperature_limits: dict[str, Any]
     speed_limits: dict[str, Any]
@@ -252,6 +317,26 @@ class FormatCapability(BaseModel):
     notes: str | None = None
 
 
+class TemperatureRangeResponse(BaseModel):
+    status: Literal["valid", "conflict"]
+    safe_min_c: float
+    safe_max_c: float
+    recommended_c: int
+    first_layer_recommended_c: int
+    printer_min_c: float
+    printer_max_c: float
+    material_min_c: float
+    material_max_c: float
+    bed_safe_min_c: float
+    bed_safe_max_c: float
+    bed_recommended_c: int
+    provenance: str
+    reason: str
+    conflict_code: str | None = None
+    conflict_message: str | None = None
+    warnings: list[str] = Field(default_factory=list)
+
+
 # --------------------------------------------------------------------------- #
 # jobs
 # --------------------------------------------------------------------------- #
@@ -262,6 +347,7 @@ class SliceJobCreate(BaseModel):
     printer_id: uuid.UUID
     material_profile_id: uuid.UUID
     objective: Literal["quality", "strength", "speed", "material", "balanced"] = "balanced"
+    nozzle_diameter_mm: Decimal | None = None
     engine_settings_overrides: dict[str, Any] = Field(default_factory=dict)
     locked_parameters: list[str] = Field(default_factory=list)
 
@@ -308,3 +394,151 @@ class GeneratedFileResponse(BaseModel):
     is_blocked: bool
     blocked_reason: str | None
     created_at: datetime
+
+
+# --------------------------------------------------------------------------- #
+# AI print preparation
+# --------------------------------------------------------------------------- #
+
+
+class PreparationCreate(BaseModel):
+    model_version_id: uuid.UUID
+    printer_id: uuid.UUID
+    material_profile_id: uuid.UUID
+    objective: Literal["quality", "strength", "speed", "material", "balanced"] = "balanced"
+    user_request: str = Field(
+        default="",
+        max_length=4000,
+        description="Free-text instruction shown to the model, e.g. 'print it strong'.",
+    )
+    output_format: str | None = Field(
+        default=None,
+        max_length=32,
+        description=(
+            "Optional deliverable format. Checked against the printer's own "
+            "declaration immediately: an undeclared format is refused with 409, "
+            "a declared one this deployment cannot produce with 503."
+        ),
+    )
+
+
+class PreparationReplanRequest(BaseModel):
+    user_request: str = Field(default="", max_length=4000)
+    feedback: str = Field(
+        default="",
+        max_length=4000,
+        description="What to change about the refused plan.",
+    )
+    objective: Literal["quality", "strength", "speed", "material", "balanced"] = "balanced"
+
+
+class PreparationOrientRequest(BaseModel):
+    candidate_id: str | None = Field(
+        default=None,
+        max_length=64,
+        description="ID of the candidate orientation to apply. If omitted, returns candidate options.",
+    )
+
+
+class PreparationSliceRequest(BaseModel):
+    objective: Literal["quality", "strength", "speed", "material", "balanced"] = "balanced"
+    output_format: str | None = Field(
+        default=None,
+        max_length=32,
+        description=(
+            "Deliverable to produce from the sliced toolpath. Omit to keep the "
+            "default selection semantics (G-code only)."
+        ),
+    )
+
+
+class PreparationOutputFormat(BaseModel):
+    """One output format, as the *printer profile* declares it."""
+
+    key: str
+    format: str
+    extension: str
+    declared_by_profile: bool
+    advertised: bool
+    available: bool
+    reason: str = ""
+    remedy: str = ""
+
+
+class PreparationSliceRef(BaseModel):
+    slice_job_id: uuid.UUID
+    status: str
+    input_fingerprint: str | None = None
+    error_code: str | None = None
+    error_detail: str | None = None
+
+
+class OutputArtifactResponse(BaseModel):
+    id: uuid.UUID
+    filename: str
+    format: str
+    bytes: int
+    checksum: str
+    printer: str | None = None
+    material: str | None = None
+    slicer: str | None = None
+    slicer_version: str | None = None
+    configuration_fingerprint: str | None = None
+    validation: dict[str, Any] = Field(default_factory=dict)
+    media_type: str = "application/octet-stream"
+    created_at: datetime | None = None
+
+
+class PreparationJobSummary(BaseModel):
+    """One row of history: identity and verdict, no derived payload."""
+
+    id: uuid.UUID
+    status: str
+    passed: bool
+    attempt: int
+    max_attempts: int
+    model_version_id: uuid.UUID
+    printer_id: uuid.UUID
+    material_profile_id: uuid.UUID
+    rejected_reason: str | None = None
+    prompt_sha256: str = ""
+    duration_ms: int = 0
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class PreparationJobResponse(BaseModel):
+    """Everything the attempt recorded, plus what the printer may produce."""
+
+    id: uuid.UUID
+    status: str
+    passed: bool
+    attempt: int
+    max_attempts: int
+    model_version_id: uuid.UUID
+    printer_id: uuid.UUID
+    material_profile_id: uuid.UUID
+
+    model: dict[str, Any] | None = None
+    printer: dict[str, Any] | None = None
+    material: dict[str, Any] | None = None
+
+    prompt: str = ""
+    prompt_sha256: str = ""
+    raw_response: str | None = None
+    provider: str | None = None
+    model_identifier: str | None = None
+
+    plan: dict[str, Any] = Field(default_factory=dict)
+    validation: dict[str, Any] = Field(default_factory=dict)
+    normalisations: list[Any] = Field(default_factory=list)
+    rejected_reason: str | None = None
+    input_sha256: str = ""
+    duration_ms: int = 0
+
+    output_formats: list[PreparationOutputFormat] = Field(default_factory=list)
+    slice: PreparationSliceRef | None = None
+    outputs: list[OutputArtifactResponse] = Field(default_factory=list)
+
+    created_at: str | None = None
+    updated_at: str | None = None

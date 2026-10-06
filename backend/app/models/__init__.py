@@ -30,6 +30,7 @@ from app.models.catalog import (
     ValidationStatus,
 )
 from app.models.identity import ApiToken, AuditLog, RateLimitBucket, User, UserRole
+from app.models.preparation import PreparationStatus, PrintPreparationJob
 from app.models.printing import (
     AiDecision,
     AiDecisionEvidence,
@@ -84,9 +85,11 @@ __all__ = [
     "MotionSystem",
     "Nozzle",
     "Orientation",
+    "PreparationStatus",
     "PrintHistory",
     "PrintJob",
     "PrintOutcome",
+    "PrintPreparationJob",
     "PrintStatus",
     "Printer",
     "ProfileStatus",

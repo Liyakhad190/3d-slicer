@@ -20,7 +20,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app.api.routers import auth, catalog, health, models, slicing
+from app.api.routers import auth, catalog, health, models, preparation, slicing
+from app.intelligence.api.router import router as ai_router
 from app.core.config import get_settings
 from app.core.errors import AppError
 from app.core.logging import get_logger
@@ -72,7 +73,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         "startup.ready",
         environment=settings.environment,
         api_prefix=settings.api_prefix,
-        ai_provider=settings.ai_provider,
+        llm_provider=settings.llm_provider,
+        llm_model=settings.ollama_model if settings.llm_provider == "ollama" else settings.ai_model,
     )
     yield
     log.info("startup.shutdown")
@@ -145,6 +147,8 @@ def create_app() -> FastAPI:
     app.include_router(models.router, prefix=prefix)
     app.include_router(catalog.router, prefix=prefix)
     app.include_router(slicing.router, prefix=prefix)
+    app.include_router(preparation.router, prefix=prefix)
+    app.include_router(ai_router, prefix=prefix)
 
     @app.get("/", include_in_schema=False)
     def root() -> dict[str, Any]:

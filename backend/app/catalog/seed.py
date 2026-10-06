@@ -21,7 +21,9 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.catalog.validator import validate_machine_profile
 from app.core.logging import get_logger
+from app.db.base import utcnow
 from app.models.catalog import (
     Abrasiveness,
     GcodeDialect,
@@ -235,6 +237,19 @@ def _seed_machines(
         }
         profile_hash = _hash_payload(profile_body)
 
+        # Ensure any broken seed profiles are flagged as invalid
+        for existing_p in db.execute(
+            select(MachineProfile).where(MachineProfile.machine_id == machine.id)
+        ).scalars():
+            if getattr(existing_p, "provenance", "seed") == "seed":
+                v = validate_machine_profile(existing_p, machine)
+                if not v.is_valid:
+                    existing_p.validation_status = ValidationStatus.invalid
+                    existing_p.validation_reason = v.reason
+                elif existing_p.validation_status != ValidationStatus.validated:
+                    existing_p.validation_status = ValidationStatus.unvalidated
+                    existing_p.validation_reason = "Community-sourced seed data. Values must be bench-tested before validation."
+
         existing = db.execute(
             select(MachineProfile).where(
                 MachineProfile.machine_id == machine.id,
@@ -243,6 +258,15 @@ def _seed_machines(
         ).scalar_one_or_none()
         if existing is not None:
             continue
+
+        verdict = validate_machine_profile(profile, machine)
+        val_status = ValidationStatus.unvalidated if verdict.is_valid else ValidationStatus.invalid
+        val_reason = (
+            "Community-sourced seed data. Values must be bench-tested before validation."
+            if verdict.is_valid
+            else verdict.reason
+        )
+        prof_status = ProfileStatus.draft
 
         next_version = (
             db.execute(
@@ -258,10 +282,12 @@ def _seed_machines(
             MachineProfile(
                 machine_id=machine.id,
                 profile_version=next_version,
-                status=ProfileStatus.draft,
-                # Community data. Promotion to `validated` is a deliberate,
-                # recorded act performed after bench testing a real machine.
-                validation_status=ValidationStatus.unvalidated,
+                status=prof_status,
+                validation_status=val_status,
+                validation_reason=val_reason,
+                provenance="seed",
+                validated_at=None,
+                validated_by=None,
                 profile_hash=profile_hash,
                 build_volume=profile["build_volume"],
                 bed_type=profile.get("bed_type"),
@@ -282,6 +308,8 @@ def _seed_machines(
                 changelog=(
                     "Community-sourced seed data. Values must be checked against "
                     "the specific machine before validation."
+                    if verdict.is_valid
+                    else f"Seed validation failed: {verdict.reason}"
                 ),
             )
         )

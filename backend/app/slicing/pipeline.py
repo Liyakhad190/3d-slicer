@@ -15,6 +15,7 @@ have run.
 
 from __future__ import annotations
 
+import hashlib
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -64,6 +65,84 @@ _TRIMESH_FILE_TYPE: dict[str, str] = {
     "glb": "glb",
     "gltf": "gltf",
 }
+
+# ---------------------------------------------------------------------------
+# Vendor / technology -> output file extension + MIME type
+# ---------------------------------------------------------------------------
+# Rules (in priority order):
+#   1. Machine technology (msla/dlp -> no G-code at all, but we store what
+#      CuraEngine produced so the user can inspect it).
+#   2. Firmware string hints (Marlin 2.x supports .bgcode).
+#   3. Default: .gcode
+#
+# The extension must describe the bytes this stage actually produced. The
+# engine emits text G-code, so the file stored here is always `.gcode` (or
+# `.bgcode`/`.g` when the technology says so) — never the format the machine
+# ultimately wants.
+#
+# FlashForge used to be special-cased here to rename the output `.gx`. That
+# was a fake file: `.gx` is an X3G binary container produced by an encoder,
+# not renamed G-code text, so the "download" was useless — and because the
+# renamed row carried `kind="gx"`, it did not match the `kind == "gcode"`
+# selector the toolpath endpoint queries, so those jobs had no readable output
+# at all. Presentation formats are produced *from* this file afterwards by
+# `app.slicing.output` (OutputFormatterRegistry): convert, validate, store, or
+# report exactly which encoder is missing.
+#
+# .bgcode - Binary G-code (Bambu Lab, Prusa with Marlin 2.x + bgcode)
+# .gcode  - Everything else, including FlashForge
+
+_VENDOR_EXT: dict[str, tuple[str, str]] = {
+    # vendor_lower -> (extension_no_dot, MIME)
+    "bambu lab": ("gcode", "text/x-gcode"),   # Bambu uses .gcode but bgcode inside
+    "bambu": ("gcode", "text/x-gcode"),
+    "makerbot": ("gcode", "text/x-gcode"),    # GPX pipeline not implemented; store gcode
+    "raise3d": ("gcode", "text/x-gcode"),
+    "ultimaker": ("gcode", "text/x-gcode"),
+    "prusa": ("gcode", "text/x-gcode"),
+    "creality": ("gcode", "text/x-gcode"),
+    "anycubic": ("gcode", "text/x-gcode"),
+    "elegoo": ("gcode", "text/x-gcode"),
+}
+
+_FIRMWARE_EXT: dict[str, tuple[str, str]] = {
+    # firmware_lower prefix -> (extension_no_dot, MIME)
+    "bgcode": ("bgcode", "application/octet-stream"),
+    "klipper": ("gcode", "text/x-gcode"),
+    "marlin": ("gcode", "text/x-gcode"),
+    "repetier": ("gcode", "text/x-gcode"),
+    "reprapfirmware": ("gcode", "text/x-gcode"),
+    "smoothieware": ("gcode", "text/x-gcode"),
+}
+
+
+def _output_extension(
+    vendor: str | None,
+    technology: str | None,
+    firmware: str | None,
+) -> tuple[str, str]:
+    """Return (extension_without_dot, mime_type) for the file this stage emits.
+
+    Deliberately vendor-name agnostic: vendor-specific *presentation* formats
+    are the job of `app.slicing.output.OutputFormatterRegistry`.
+    """
+    # 1. Vendor override
+    if vendor:
+        v = vendor.lower().strip()
+        for key, result in _VENDOR_EXT.items():
+            if key in v:
+                return result
+
+    # 2. Firmware hint
+    if firmware:
+        f = firmware.lower().strip()
+        for key, result in _FIRMWARE_EXT.items():
+            if key in f:
+                return result
+
+    # 3. Non-FDM technologies don't produce vanilla G-code but we store
+    #    what the engine produced under .gcode for inspection purposes.
+    return ("gcode", "text/x-gcode")
 
 
 @dataclass
@@ -184,8 +263,15 @@ def run_pipeline(
     material_profile: MaterialProfile,
     objective: str = "balanced",
     locked: dict[str, Any] | None = None,
+    overrides: dict[str, Any] | None = None,
 ) -> PipelineResult:
     """Execute the pipeline for an already-created job.
+
+    `locked` are keys the optimizer must not change; `overrides` are canonical
+    keys the caller owns directly (a validated print plan's first-layer speed,
+    brim width, z-hop, ...) that the optimizer has no knob for. Overrides are
+    merged *over* the optimizer's output — never before it — so the optimizer
+    still decides everything it owns, and a blocked configuration still blocks.
 
     Failures are recorded on the job and re-raised as typed errors, so a caller
     sees exactly what went wrong rather than a generic 500.
@@ -233,8 +319,9 @@ def run_pipeline(
         # -- 1b. does it fit, before spending time on anything else? --------
         build = machine_profile.build_volume or {}
         dims = report.metrics.dimensions_mm
+        available_volume = {axis: float(build.get(axis) or 0) for axis in ("x", "y", "z")}
         for axis in ("x", "y", "z"):
-            limit = float(build.get(axis) or 0)
+            limit = available_volume[axis]
             if limit and dims[axis] > limit:
                 raise ValidationFailedError(
                     f"The model is {dims[axis]:.1f} mm on {axis.upper()}, larger than this "
@@ -243,6 +330,8 @@ def run_pipeline(
                         "axis": axis,
                         "model_mm": dims[axis],
                         "build_volume_mm": limit,
+                        "dimensions_mm": dims,
+                        "available_build_volume_mm": available_volume,
                         "remedy": "Re-orient the model, scale it in CAD, or choose a larger machine.",
                     },
                 )
@@ -279,12 +368,16 @@ def run_pipeline(
             stage="optimizing",
         )
 
+        parameters = dict(optimised.parameters)
+        if overrides:
+            parameters.update(overrides)
+
         configuration = from_profiles(
             machine_profile=machine_profile,
             material_profile=material_profile,
             nozzle_diameter_mm=float(nozzle.diameter_mm),
             nozzle_material=printer.nozzle_material,
-            parameters=optimised.parameters,
+            parameters=parameters,
             objective=objective,  # type: ignore[arg-type]
             warnings=optimised.warnings,
             blocked_reasons=optimised.block_reasons,
@@ -335,9 +428,9 @@ def run_pipeline(
         db.flush()
 
         engine_settings = adapter.prepare_configuration(configuration)
-        source_blob = db.get(Blob, version.blob_id)
-        if source_blob is None:
-            raise InsufficientInformationError("The model file is missing from the object store.")
+        source_blob = models_service.active_blob(db, version)
+        job.model_input_sha256 = source_blob.sha256
+        db.flush()
 
         workspace = Path(storage.new_job_workspace(job.id))
         output_path = workspace / "output.gcode"
@@ -351,7 +444,7 @@ def run_pipeline(
                 output_path=output_path,
                 settings=engine_settings,
                 job_label=str(job.id),
-                model_format=_TRIMESH_FILE_TYPE.get(version.format),
+                model_format=_TRIMESH_FILE_TYPE.get(source_blob.detected_format),
             )
         )
 
@@ -379,11 +472,23 @@ def run_pipeline(
             stage="slicing",
         )
 
+        # Name the file after the bytes we actually produced. Other formats
+        # (e.g. FlashForge .gx) are derived from this one later by
+        # app.slicing.output, never by renaming it here.
+        _machine = machine_profile.machine if hasattr(machine_profile, "machine") else None
+        _ext, _mime = _output_extension(
+            vendor=_machine.vendor if _machine else None,
+            technology=_machine.technology.value if _machine else None,
+            firmware=printer.firmware,
+        )
+        _base_name = version.sanitized_filename.rsplit(".", 1)[0]
+        _output_filename = f"{_base_name}.{_ext}"
+
         generated = GeneratedFile(
             slice_job_id=job.id,
             blob_id=gcode_blob.id,
-            kind="gcode",
-            filename=f"{version.sanitized_filename.rsplit('.', 1)[0]}.gcode",
+            kind=_ext,
+            filename=_output_filename,
             sha256=gcode_blob.sha256,
             byte_size=len(gcode_bytes),
             is_blocked=False,
@@ -452,7 +557,9 @@ def run_pipeline(
 
         job.status = JobStatus.completed
         job.finished_at = utcnow()
-        job.input_fingerprint = configuration.fingerprint()
+        job.input_fingerprint = hashlib.sha256(
+            f"{configuration.fingerprint()}:{job.model_input_sha256}".encode("utf-8")
+        ).hexdigest()
         db.flush()
         result.status = JobStatus.completed
         _event(db, job, "Pipeline complete and validated.")

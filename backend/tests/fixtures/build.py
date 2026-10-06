@@ -58,6 +58,11 @@ def build() -> dict[str, str]:
     tiny = trimesh.creation.box(extents=(2, 2, 2))
     written["tiny_2mm.stl"] = _export(tiny, "tiny_2mm.stl")
 
+    # 6b. A part exported in METERS instead of millimetres: the numbers are
+    # 1000x too small, which is what the workbench's recovery buttons exist for.
+    meters = trimesh.creation.box(extents=(0.02, 0.02, 0.03))
+    written["meters_20mm.stl"] = _export(meters, "meters_20mm.stl")
+
     # 7. Multi-part assembly: two separated bodies.
     assembly = trimesh.util.concatenate(
         [
