@@ -1,11 +1,8 @@
 /**
- * Printer-specific 3D models for the viewport.
+ * Printer-specific 3D models for the viewport with real-time kinematics.
  *
  * Each supported machine gets its own model, built from primitives at the
- * machine's real proportions (frame, gantry, bed, enclosure, toolhead, screen),
- * so the viewport shows the printer that was actually selected rather than one
- * generic frame. The build volume always comes from the selected profile; the
- * outer dimensions of the machine are approximations of the published specs.
+ * machine's real proportions (frame, gantry, bed, enclosure, toolhead, screen).
  *
  * Coordinates match the viewport: the build plate corner is the origin, +X is
  * right, +Y is toward the back of the printer, +Z is up, units are millimetres.
@@ -22,12 +19,22 @@ export interface BuildVolumeMm {
   z: number
 }
 
+export interface PrinterKinematics {
+  /** Update toolhead / nozzle position in build plate space (0..buildVolume.x, 0..buildVolume.y, 0..buildVolume.z) */
+  setNozzlePosition: (x: number, y: number, z: number, isExtruding?: boolean) => void
+  /** Reset to default home position */
+  home: () => void
+  /** Get current nozzle position */
+  getNozzlePosition: () => { x: number; y: number; z: number }
+}
+
 export interface PrinterModel {
   kind: PrinterKind
   title: string
   group: THREE.Group
   /** Bounds of the whole machine, used to frame the camera. */
   bounds: THREE.Box3
+  kinematics?: PrinterKinematics
 }
 
 const TITLES: Record<PrinterKind, string> = {
@@ -99,11 +106,22 @@ type Palette = ReturnType<typeof palette>
 
 class Kit {
   readonly group = new THREE.Group()
+  private targetGroup: THREE.Group = this.group
 
   constructor(
     readonly cx: number,
     readonly cy: number,
   ) {}
+
+  withGroup<T>(group: THREE.Group, fn: () => T): T {
+    const prev = this.targetGroup
+    this.targetGroup = group
+    try {
+      return fn()
+    } finally {
+      this.targetGroup = prev
+    }
+  }
 
   /** Axis-aligned box from min corner to max corner. */
   box(
@@ -119,14 +137,14 @@ class Kit {
     const geometry = new THREE.BoxGeometry(Math.abs(x1 - x0), Math.abs(y1 - y0), Math.abs(z1 - z0))
     const mesh = new THREE.Mesh(geometry, material)
     mesh.position.set((x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2)
-    this.group.add(mesh)
+    this.targetGroup.add(mesh)
     if (edge !== undefined) {
       const lines = new THREE.LineSegments(
         new THREE.EdgesGeometry(geometry),
         new THREE.LineBasicMaterial({ color: edge, transparent: true, opacity: 0.55 }),
       )
       lines.position.copy(mesh.position)
-      this.group.add(lines)
+      this.targetGroup.add(lines)
     }
     return mesh
   }
@@ -145,7 +163,7 @@ class Kit {
     if (axis === 'x') mesh.rotation.z = Math.PI / 2
     if (axis === 'z') mesh.rotation.x = Math.PI / 2
     mesh.position.set(x, y, z)
-    this.group.add(mesh)
+    this.targetGroup.add(mesh)
     return mesh
   }
 }
@@ -171,23 +189,28 @@ function bed(
 // Creality Ender 3 - open cartesian bed-slinger, aluminium extrusion frame
 // ---------------------------------------------------------------------------
 
-function ender3(k: Kit, p: Palette, v: BuildVolumeMm): void {
+function ender3(k: Kit, p: Palette, v: BuildVolumeMm): PrinterKinematics {
   const { cx, cy } = k
-  const nozzleZ = v.z + 10
+  const defaultNozzleZ = v.z + 10
   const baseZ = -70
   const top = baseZ + 465
   const bedX = v.x + 15
   const bedY = v.y + 15
 
-  bed(k, p, bedX, bedY, p.pei, 5.5)
-  k.box(p.darkGray, cx - bedX / 2, cy - bedY / 2, -14, cx + bedX / 2, cy + bedY / 2, -8)
-  for (const sx of [-1, 1]) {
-    for (const sy of [-1, 1]) {
-      k.cyl(p.black, 'z', cx + sx * (bedX / 2 - 20), cy + sy * (bedY / 2 - 20), -22, 10, 16)
+  // Moving Bed
+  const bedGroup = new THREE.Group()
+  k.group.add(bedGroup)
+  k.withGroup(bedGroup, () => {
+    bed(k, p, bedX, bedY, p.pei, 5.5)
+    k.box(p.darkGray, cx - bedX / 2, cy - bedY / 2, -14, cx + bedX / 2, cy + bedY / 2, -8)
+    for (const sx of [-1, 1]) {
+      for (const sy of [-1, 1]) {
+        k.cyl(p.black, 'z', cx + sx * (bedX / 2 - 20), cy + sy * (bedY / 2 - 20), -22, 10, 16)
+      }
     }
-  }
+  })
 
-  // base beam (Y axis), cross tie, uprights, top brace
+  // Base frame, uprights & top brace (static)
   k.box(p.frame, cx - 40, cy - v.y / 2 - 110, baseZ, cx + 40, cy + v.y / 2 + 110, -30)
   k.box(p.frame, cx - 165, cy + 40, baseZ, cx + 165, cy + 80, -30)
   k.box(p.frame, cx - 165, cy + 40, baseZ, cx - 145, cy + 80, top)
@@ -198,39 +221,103 @@ function ender3(k: Kit, p: Palette, v: BuildVolumeMm): void {
   k.cyl(p.steel, 'z', cx - 152, cy + 25, (top - 20 - 30) / 2, 4, top - 20 + 30)
   k.box(p.darkGray, cx - 173, cy + 4, baseZ, cx - 131, cy + 46, baseZ + 47)
 
-  // X gantry, motor, hotend
-  k.box(p.frame, cx - 165, cy + 20, nozzleZ + 30, cx + 165, cy + 40, nozzleZ + 70)
-  k.box(p.steel, cx - 172, cy + 18, nozzleZ + 25, cx - 140, cy + 42, nozzleZ + 75)
-  k.box(p.steel, cx + 140, cy + 18, nozzleZ + 25, cx + 172, cy + 42, nozzleZ + 75)
-  k.box(p.darkGray, cx + 172, cy + 18, nozzleZ + 28, cx + 214, cy + 60, nozzleZ + 70)
-  k.box(p.darkGray, cx + 165, cy + 40, top - 80, cx + 207, cy + 82, top - 38)
-  k.box(p.darkGray, cx - 24, cy - 18, nozzleZ + 10, cx + 24, cy + 20, nozzleZ + 75)
-  k.box(p.black, cx - 20, cy - 30, nozzleZ + 8, cx + 20, cy - 10, nozzleZ + 40)
-  k.box(p.gold, cx - 8, cy - 8, nozzleZ + 3, cx + 8, cy + 8, nozzleZ + 10)
-  k.cyl(p.gold, 'z', cx, cy, nozzleZ + 1.5, 3, 3)
-
-  // control box with the LCD and knob, power supply
+  // Control box with LCD & power supply
   const front = cy - v.y / 2 - 110
   k.box(p.darkGray, cx + 10, front, baseZ + 4, cx + 118, front + 102, -6)
   k.box(p.screen, cx + 22, front - 2, -46, cx + 88, front, -22)
   k.cyl(p.steel, 'y', cx + 102, front - 4, -34, 8, 8)
   k.box(p.steel, cx + 40, cy + 120, baseZ, cx + 100, cy + 215, -20)
+
+  // Moving Z Gantry (moves vertically along Z)
+  const zGantry = new THREE.Group()
+  k.group.add(zGantry)
+
+  k.withGroup(zGantry, () => {
+    // X gantry rail and brackets
+    k.box(p.frame, cx - 165, cy + 20, 30, cx + 165, cy + 40, 70)
+    k.box(p.steel, cx - 172, cy + 18, 25, cx - 140, cy + 42, 75)
+    k.box(p.steel, cx + 140, cy + 18, 25, cx + 172, cy + 42, 75)
+    k.box(p.darkGray, cx + 172, cy + 18, 28, cx + 214, cy + 60, 70)
+    k.box(p.darkGray, cx + 165, cy + 40, 50, cx + 207, cy + 82, 85)
+  })
+
+  // Moving Toolhead Carriage (moves along X rail within zGantry)
+  const xCarriage = new THREE.Group()
+  zGantry.add(xCarriage)
+
+  let glowMesh: THREE.Mesh | null = null
+  let nozzleLight: THREE.PointLight | null = null
+
+  k.withGroup(xCarriage, () => {
+    // Toolhead body, fan shroud & hotend
+    k.box(p.darkGray, cx - 24, cy - 18, 10, cx + 24, cy + 20, 75)
+    k.box(p.black, cx - 20, cy - 30, 8, cx + 20, cy - 10, 40)
+    k.box(p.gold, cx - 8, cy - 8, 3, cx + 8, cy + 8, 10)
+    k.cyl(p.gold, 'z', cx, cy, 1.5, 3, 3) // tip at z = 0
+
+    // Molten nozzle tip indicator
+    const glowGeo = new THREE.SphereGeometry(1.2, 8, 8)
+    const glowMat = new THREE.MeshBasicMaterial({ color: 0x38bdf8, transparent: true, opacity: 0.9 })
+    glowMesh = new THREE.Mesh(glowGeo, glowMat)
+    glowMesh.position.set(cx, cy, 0.4)
+    xCarriage.add(glowMesh)
+
+    nozzleLight = new THREE.PointLight(0x38bdf8, 1.2, 35)
+    nozzleLight.position.set(cx, cy, 1.0)
+    xCarriage.add(nozzleLight)
+  })
+
+  let curX = cx
+  let curY = cy
+  let curZ = defaultNozzleZ
+
+  const kinematics: PrinterKinematics = {
+    setNozzlePosition(x: number, y: number, z: number, isExtruding = true) {
+      curX = x
+      curY = y
+      curZ = z
+      zGantry.position.z = z
+      xCarriage.position.x = x - cx
+      xCarriage.position.y = y - cy
+      bedGroup.position.y = (cy - y) * 0.25
+      if (nozzleLight) {
+        nozzleLight.color.setHex(isExtruding ? 0x38bdf8 : 0xff7043)
+        nozzleLight.intensity = isExtruding ? 1.4 : 0.3
+      }
+      if (glowMesh) {
+        ;(glowMesh.material as THREE.MeshBasicMaterial).color.setHex(isExtruding ? 0x38bdf8 : 0xff7043)
+      }
+    },
+    home() {
+      kinematics.setNozzlePosition(cx, cy, defaultNozzleZ, false)
+    },
+    getNozzlePosition() {
+      return { x: curX, y: curY, z: curZ }
+    },
+  }
+
+  kinematics.home()
+  return kinematics
 }
 
 // ---------------------------------------------------------------------------
 // Prusa MK4S - open i3 bed-slinger, black frame, orange printed parts
 // ---------------------------------------------------------------------------
 
-function mk4s(k: Kit, p: Palette, v: BuildVolumeMm): void {
+function mk4s(k: Kit, p: Palette, v: BuildVolumeMm): PrinterKinematics {
   const { cx, cy } = k
-  const nozzleZ = v.z + 10
+  const defaultNozzleZ = v.z + 10
   const baseZ = -52
   const top = v.z + 120
 
-  bed(k, p, v.x + 8, v.y + 8, p.pei, 7)
-  k.box(p.frame, k.cx - (v.x + 8) / 2, cy - (v.y + 8) / 2, -16, cx + (v.x + 8) / 2, cy + (v.y + 8) / 2, -9.5)
+  const bedGroup = new THREE.Group()
+  k.group.add(bedGroup)
+  k.withGroup(bedGroup, () => {
+    bed(k, p, v.x + 8, v.y + 8, p.pei, 7)
+    k.box(p.frame, cx - (v.x + 8) / 2, cy - (v.y + 8) / 2, -16, cx + (v.x + 8) / 2, cy + (v.y + 8) / 2, -9.5)
+  })
 
-  // base: two Y beams, front/rear ties, post tie
+  // Base frame
   const yFront = cy - v.y / 2 - 90
   const yRear = cy + v.y / 2 + 130
   k.box(p.frame, cx - 100, yFront, baseZ, cx - 80, yRear, -22)
@@ -246,32 +333,84 @@ function mk4s(k: Kit, p: Palette, v: BuildVolumeMm): void {
     k.cyl(p.steel, 'z', cx + side * 150, cy + 45, (top - 10 - 22) / 2, 4, top - 10 + 22)
   }
 
-  // X axis with orange X-ends
-  k.box(p.frame, cx - 150, cy + 30, nozzleZ + 30, cx + 150, cy + 50, nozzleZ + 62)
-  k.box(p.orange, cx - 166, cy + 22, nozzleZ + 20, cx - 126, cy + 66, nozzleZ + 72)
-  k.box(p.orange, cx + 126, cy + 22, nozzleZ + 20, cx + 166, cy + 66, nozzleZ + 72)
-
-  // Nextruder: black body, orange fan shroud, heater block, nozzle
-  k.box(p.black, cx - 28, cy - 22, nozzleZ + 8, cx + 28, cy + 30, nozzleZ + 74)
-  k.box(p.orange, cx - 22, cy - 40, nozzleZ + 10, cx + 22, cy - 8, nozzleZ + 46)
-  k.box(p.gold, cx - 8, cy - 8, nozzleZ + 3, cx + 8, cy + 8, nozzleZ + 10)
-  k.cyl(p.gold, 'z', cx, cy, nozzleZ + 1.5, 3, 3)
-
-  // LCD tower, front right
+  // LCD & Power Supply
   const lcdY = cy - v.y / 2 - 60
   k.box(p.frame, cx + 100, lcdY, baseZ, cx + 175, lcdY + 45, -22)
   k.box(p.black, cx + 135, lcdY, -22, cx + 175, lcdY + 45, 40)
   k.box(p.screen, cx + 140, lcdY - 2, 2, cx + 170, lcdY, 32)
-
-  // power supply, rear
   k.box(p.black, cx - 60, cy + v.y / 2 + 140, -22, cx + 60, cy + v.y / 2 + 225, 45)
+
+  // Z Gantry
+  const zGantry = new THREE.Group()
+  k.group.add(zGantry)
+  k.withGroup(zGantry, () => {
+    k.box(p.frame, cx - 150, cy + 30, 30, cx + 150, cy + 50, 62)
+    k.box(p.orange, cx - 166, cy + 22, 20, cx - 126, cy + 66, 72)
+    k.box(p.orange, cx + 126, cy + 22, 20, cx + 166, cy + 66, 72)
+  })
+
+  // Toolhead Carriage (Nextruder)
+  const xCarriage = new THREE.Group()
+  zGantry.add(xCarriage)
+
+  let glowMesh: THREE.Mesh | null = null
+  let nozzleLight: THREE.PointLight | null = null
+
+  k.withGroup(xCarriage, () => {
+    k.box(p.black, cx - 28, cy - 22, 8, cx + 28, cy + 30, 74)
+    k.box(p.orange, cx - 22, cy - 40, 10, cx + 22, cy - 8, 46)
+    k.box(p.gold, cx - 8, cy - 8, 3, cx + 8, cy + 8, 10)
+    k.cyl(p.gold, 'z', cx, cy, 1.5, 3, 3)
+
+    const glowGeo = new THREE.SphereGeometry(1.2, 8, 8)
+    const glowMat = new THREE.MeshBasicMaterial({ color: 0x38bdf8, transparent: true, opacity: 0.9 })
+    glowMesh = new THREE.Mesh(glowGeo, glowMat)
+    glowMesh.position.set(cx, cy, 0.4)
+    xCarriage.add(glowMesh)
+
+    nozzleLight = new THREE.PointLight(0x38bdf8, 1.2, 35)
+    nozzleLight.position.set(cx, cy, 1.0)
+    xCarriage.add(nozzleLight)
+  })
+
+  let curX = cx
+  let curY = cy
+  let curZ = defaultNozzleZ
+
+  const kinematics: PrinterKinematics = {
+    setNozzlePosition(x: number, y: number, z: number, isExtruding = true) {
+      curX = x
+      curY = y
+      curZ = z
+      zGantry.position.z = z
+      xCarriage.position.x = x - cx
+      xCarriage.position.y = y - cy
+      bedGroup.position.y = (cy - y) * 0.25
+      if (nozzleLight) {
+        nozzleLight.color.setHex(isExtruding ? 0x38bdf8 : 0xff7043)
+        nozzleLight.intensity = isExtruding ? 1.4 : 0.3
+      }
+      if (glowMesh) {
+        ;(glowMesh.material as THREE.MeshBasicMaterial).color.setHex(isExtruding ? 0x38bdf8 : 0xff7043)
+      }
+    },
+    home() {
+      kinematics.setNozzlePosition(cx, cy, defaultNozzleZ, false)
+    },
+    getNozzlePosition() {
+      return { x: curX, y: curY, z: curZ }
+    },
+  }
+
+  kinematics.home()
+  return kinematics
 }
 
 // ---------------------------------------------------------------------------
 // Bambu Lab X1 Carbon / P1S - enclosed CoreXY, 389 x 389 x 457 mm body
 // ---------------------------------------------------------------------------
 
-function bambu(k: Kit, p: Palette, v: BuildVolumeMm, variant: 'x1c' | 'p1s'): void {
+function bambu(k: Kit, p: Palette, v: BuildVolumeMm, variant: 'x1c' | 'p1s'): PrinterKinematics {
   const { cx, cy } = k
   const hx = v.x / 2 + 66.5
   const hy = v.y / 2 + 66.5
@@ -281,10 +420,10 @@ function bambu(k: Kit, p: Palette, v: BuildVolumeMm, variant: 'x1c' | 'p1s'): vo
   const x1 = cx + hx
   const y0 = cy - hy
   const y1 = cy + hy
-  const nozzleZ = v.z + 10
+  const defaultNozzleZ = v.z + 10
   const edge = 0x0a0a0a
 
-  // plinth and corner posts
+  // Plinth and corner posts
   k.box(p.frame, x0, y0, zb, x1, y1, zb + 14)
   for (const [px, py] of [
     [x0, y0],
@@ -301,7 +440,7 @@ function bambu(k: Kit, p: Palette, v: BuildVolumeMm, variant: 'x1c' | 'p1s'): vo
     k.box(p.frame, x1 - 16, y0, z, x1, y1, zt)
   }
 
-  // shell: side and back panels, front door, top lid
+  // Panels
   k.box(p.sidePanel, x0, y0 + 16, zb + 14, x0 + 3, y1 - 16, zt - 14, edge)
   k.box(p.sidePanel, x1 - 3, y0 + 16, zb + 14, x1, y1 - 16, zt - 14, edge)
   k.box(p.sidePanel, x0 + 16, y1 - 3, zb + 14, x1 - 16, y1, zt - 14, edge)
@@ -309,40 +448,96 @@ function bambu(k: Kit, p: Palette, v: BuildVolumeMm, variant: 'x1c' | 'p1s'): vo
   const lid = variant === 'x1c' ? p.glassSmoke : p.lidPlastic
   k.box(door, x0 + 16, y0, zb + 44, x1 - 16, y0 + 3, zt - 14, edge)
   k.box(lid, x0 + 16, y0 + 16, zt - 4, x1 - 16, y1 - 16, zt, edge)
-  k.box(p.frame, x0 + 16, y0, zb + 14, x1 - 16, y0 + 4, zb + 44) // lower front panel
-  k.box(p.black, x0 + 24, y0 - 5, zb + 120, x0 + 29, y0 + 1, zb + 180) // door handle
-
-  // touch screen, lower right of the front panel
+  k.box(p.frame, x0 + 16, y0, zb + 14, x1 - 16, y0 + 4, zb + 44)
+  k.box(p.black, x0 + 24, y0 - 5, zb + 120, x0 + 29, y0 + 1, zb + 180)
   k.box(p.screen, x1 - 100, y0 - 2, zb + 20, x1 - 40, y0, zb + 40)
 
-  // CoreXY gantry: Y rods, X rod, toolhead
+  // CoreXY upper Y rails (static)
   const railX = v.x / 2 + 22
   for (const side of [-1, 1]) {
-    k.cyl(p.steel, 'y', cx + side * railX, cy, nozzleZ + 38, 4, v.y + 40)
-  }
-  k.cyl(p.darkGray, 'x', cx, cy + 20, nozzleZ + 42, 5, railX * 2)
-  k.box(p.frame, cx - 28, cy - 30, nozzleZ + 4, cx + 28, cy + 30, nozzleZ + 64)
-  k.box(p.black, cx - 20, cy - 36, nozzleZ + 10, cx + 20, cy - 28, nozzleZ + 40)
-  k.box(p.gold, cx - 7, cy - 7, nozzleZ + 3, cx + 7, cy + 7, nozzleZ + 9)
-  k.cyl(p.gold, 'z', cx, cy, nozzleZ + 1.5, 3, 3)
-  for (const side of [-1, 1]) {
-    k.box(p.frame, cx + side * (hx - 40) - 21, y1 - 60, nozzleZ + 30, cx + side * (hx - 40) + 21, y1 - 18, nozzleZ + 70)
+    k.cyl(p.steel, 'y', cx + side * railX, cy, defaultNozzleZ + 38, 4, v.y + 40)
   }
 
-  // heated bed on its rear arm, with the lead screws at the back
-  bed(k, p, v.x + 1, v.y + 1, p.peiGold, 8)
-  k.box(p.frame, cx - 110, cy, -32, cx + 110, y1 - 6, -18)
-  k.box(p.darkGray, cx - 100, cy - v.y / 2, -18, cx + 100, cy + v.y / 2, -10.5)
-  for (const side of [-1, 1]) {
-    k.cyl(p.steel, 'z', cx + side * 110, y1 - 14, (zb + 14 + zt - 20) / 2, 4, zt - 20 - zb - 14)
+  // CoreXY moving Gantry (moves along Y)
+  const yGantry = new THREE.Group()
+  k.group.add(yGantry)
+  k.withGroup(yGantry, () => {
+    k.cyl(p.darkGray, 'x', cx, cy, defaultNozzleZ + 42, 5, railX * 2)
+  })
+
+  // Toolhead Carriage (moves along X within yGantry, and moves in Z)
+  const toolheadGroup = new THREE.Group()
+  yGantry.add(toolheadGroup)
+
+  let glowMesh: THREE.Mesh | null = null
+  let nozzleLight: THREE.PointLight | null = null
+
+  k.withGroup(toolheadGroup, () => {
+    k.box(p.frame, cx - 28, cy - 30, 4, cx + 28, cy + 30, 64)
+    k.box(p.black, cx - 20, cy - 36, 10, cx + 20, cy - 28, 40)
+    k.box(p.gold, cx - 7, cy - 7, 3, cx + 7, cy + 7, 9)
+    k.cyl(p.gold, 'z', cx, cy, 1.5, 3, 3)
+
+    const glowGeo = new THREE.SphereGeometry(1.2, 8, 8)
+    const glowMat = new THREE.MeshBasicMaterial({ color: 0x38bdf8, transparent: true, opacity: 0.9 })
+    glowMesh = new THREE.Mesh(glowGeo, glowMat)
+    glowMesh.position.set(cx, cy, 0.4)
+    toolheadGroup.add(glowMesh)
+
+    nozzleLight = new THREE.PointLight(0x38bdf8, 1.2, 35)
+    nozzleLight.position.set(cx, cy, 1.0)
+    toolheadGroup.add(nozzleLight)
+  })
+
+  // Bed (CoreXY drops bed down in Z)
+  const bedGroup = new THREE.Group()
+  k.group.add(bedGroup)
+  k.withGroup(bedGroup, () => {
+    bed(k, p, v.x + 1, v.y + 1, p.peiGold, 8)
+    k.box(p.frame, cx - 110, cy, -32, cx + 110, y1 - 6, -18)
+    k.box(p.darkGray, cx - 100, cy - v.y / 2, -18, cx + 100, cy + v.y / 2, -10.5)
+    for (const side of [-1, 1]) {
+      k.cyl(p.steel, 'z', cx + side * 110, y1 - 14, (zb + 14 + zt - 20) / 2, 4, zt - 20 - zb - 14)
+    }
+  })
+
+  let curX = cx
+  let curY = cy
+  let curZ = defaultNozzleZ
+
+  const kinematics: PrinterKinematics = {
+    setNozzlePosition(x: number, y: number, z: number, isExtruding = true) {
+      curX = x
+      curY = y
+      curZ = z
+      toolheadGroup.position.x = x - cx
+      yGantry.position.y = y - cy
+      toolheadGroup.position.z = z
+      if (nozzleLight) {
+        nozzleLight.color.setHex(isExtruding ? 0x38bdf8 : 0xff7043)
+        nozzleLight.intensity = isExtruding ? 1.4 : 0.3
+      }
+      if (glowMesh) {
+        ;(glowMesh.material as THREE.MeshBasicMaterial).color.setHex(isExtruding ? 0x38bdf8 : 0xff7043)
+      }
+    },
+    home() {
+      kinematics.setNozzlePosition(cx, cy, defaultNozzleZ, false)
+    },
+    getNozzlePosition() {
+      return { x: curX, y: curY, z: curZ }
+    },
   }
+
+  kinematics.home()
+  return kinematics
 }
 
 // ---------------------------------------------------------------------------
 // Voron 2.4 (350) - enclosed CoreXY cube, extrusion frame, red toolhead
 // ---------------------------------------------------------------------------
 
-function voron24(k: Kit, p: Palette, v: BuildVolumeMm): void {
+function voron24(k: Kit, p: Palette, v: BuildVolumeMm): PrinterKinematics {
   const { cx, cy } = k
   const hx = v.x / 2 + 75
   const hy = v.y / 2 + 85
@@ -352,10 +547,10 @@ function voron24(k: Kit, p: Palette, v: BuildVolumeMm): void {
   const x1 = cx + hx
   const y0 = cy - hy
   const y1 = cy + hy
-  const nozzleZ = v.z + 10
+  const defaultNozzleZ = v.z + 10
   const edge = 0x4a5a66
 
-  // 2020 frame: posts, top and bottom rings
+  // 2020 frame
   for (const [px, py] of [
     [x0, y0],
     [x1 - 20, y0],
@@ -373,19 +568,19 @@ function voron24(k: Kit, p: Palette, v: BuildVolumeMm): void {
     k.box(p.frame, x0, y0, za, x0 + 20, y1, zbb)
     k.box(p.frame, x1 - 20, y0, za, x1, y1, zbb)
   }
-  k.box(p.black, x0 + 20, y0 + 20, zb, x1 - 20, y1 - 20, zb + 8) // floor
+  k.box(p.black, x0 + 20, y0 + 20, zb, x1 - 20, y1 - 20, zb + 8)
 
-  // panels: sides, back, split front doors, top
+  // Panels
   k.box(p.voronPanel, x0, y0 + 20, zb + 20, x0 + 3, y1 - 20, zt - 20, edge)
   k.box(p.voronPanel, x1 - 3, y0 + 20, zb + 20, x1, y1 - 20, zt - 20, edge)
   k.box(p.voronPanel, x0 + 20, y1 - 3, zb + 20, x1 - 20, y1, zt - 20, edge)
   k.box(p.voronPanel, x0 + 20, y0, zb + 20, cx - 1.5, y0 + 3, zt - 20, edge)
   k.box(p.voronPanel, cx + 1.5, y0, zb + 20, x1 - 20, y0 + 3, zt - 20, edge)
   k.box(p.voronPanel, x0 + 20, y0 + 20, zt - 3, x1 - 20, y1 - 20, zt, edge)
-  k.box(p.black, cx - 14, y0 - 8, zb + 150, cx - 8, y0, zb + 330) // door handles
+  k.box(p.black, cx - 14, y0 - 8, zb + 150, cx - 8, y0, zb + 330)
   k.box(p.black, cx + 8, y0 - 8, zb + 150, cx + 14, y0, zb + 330)
 
-  // four Z lead screws in the corners
+  // Four Z lead screws/belts
   for (const sx of [-1, 1]) {
     for (const sy of [-1, 1]) {
       k.cyl(
@@ -400,23 +595,82 @@ function voron24(k: Kit, p: Palette, v: BuildVolumeMm): void {
     }
   }
 
-  // bed: carrier, aluminium plate, PEI sheet
+  // Static bed
   k.box(p.frame, cx - v.x / 2, cy - v.y / 2, -30, cx + v.x / 2, cy + v.y / 2, -12)
   bed(k, p, v.x, v.y, p.pei, 9.5)
 
-  // gantry: Y rails, X extrusion, motors, Stealthburner toolhead
+  // Flying Z Gantry (moves in Z)
+  const zGantry = new THREE.Group()
+  k.group.add(zGantry)
+
   const railX = v.x / 2 + 38
-  for (const side of [-1, 1]) {
-    k.box(p.frame, cx + side * railX - 10, y0 + 30, nozzleZ + 45, cx + side * railX + 10, y1 - 30, nozzleZ + 65)
+  k.withGroup(zGantry, () => {
+    for (const side of [-1, 1]) {
+      k.box(p.frame, cx + side * railX - 10, y0 + 30, 45, cx + side * railX + 10, y1 - 30, 65)
+    }
+  })
+
+  // Y crossbeam (moves in Y within zGantry)
+  const yBeam = new THREE.Group()
+  zGantry.add(yBeam)
+  k.withGroup(yBeam, () => {
+    k.box(p.frame, cx - railX - 10, cy + 12, 38, cx + railX + 10, cy + 36, 58)
+  })
+
+  // Stealthburner Toolhead (moves in X within yBeam)
+  const xToolhead = new THREE.Group()
+  yBeam.add(xToolhead)
+
+  let glowMesh: THREE.Mesh | null = null
+  let nozzleLight: THREE.PointLight | null = null
+
+  k.withGroup(xToolhead, () => {
+    k.box(p.black, cx - 26, cy - 28, 6, cx + 26, cy + 34, 64)
+    k.box(p.red, cx - 20, cy - 38, 22, cx + 20, cy - 12, 56)
+    k.box(p.gold, cx - 7, cy - 7, 3, cx + 7, cy + 7, 9)
+    k.cyl(p.gold, 'z', cx, cy, 1.5, 3, 3)
+
+    const glowGeo = new THREE.SphereGeometry(1.2, 8, 8)
+    const glowMat = new THREE.MeshBasicMaterial({ color: 0x38bdf8, transparent: true, opacity: 0.9 })
+    glowMesh = new THREE.Mesh(glowGeo, glowMat)
+    glowMesh.position.set(cx, cy, 0.4)
+    xToolhead.add(glowMesh)
+
+    nozzleLight = new THREE.PointLight(0x38bdf8, 1.2, 35)
+    nozzleLight.position.set(cx, cy, 1.0)
+    xToolhead.add(nozzleLight)
+  })
+
+  let curX = cx
+  let curY = cy
+  let curZ = defaultNozzleZ
+
+  const kinematics: PrinterKinematics = {
+    setNozzlePosition(x: number, y: number, z: number, isExtruding = true) {
+      curX = x
+      curY = y
+      curZ = z
+      zGantry.position.z = z
+      yBeam.position.y = y - cy
+      xToolhead.position.x = x - cx
+      if (nozzleLight) {
+        nozzleLight.color.setHex(isExtruding ? 0x38bdf8 : 0xff7043)
+        nozzleLight.intensity = isExtruding ? 1.4 : 0.3
+      }
+      if (glowMesh) {
+        ;(glowMesh.material as THREE.MeshBasicMaterial).color.setHex(isExtruding ? 0x38bdf8 : 0xff7043)
+      }
+    },
+    home() {
+      kinematics.setNozzlePosition(cx, cy, defaultNozzleZ, false)
+    },
+    getNozzlePosition() {
+      return { x: curX, y: curY, z: curZ }
+    },
   }
-  k.box(p.frame, cx - railX - 10, cy + 12, nozzleZ + 38, cx + railX + 10, cy + 36, nozzleZ + 58)
-  k.box(p.black, cx - 26, cy - 28, nozzleZ + 6, cx + 26, cy + 34, nozzleZ + 64)
-  k.box(p.red, cx - 20, cy - 38, nozzleZ + 22, cx + 20, cy - 12, nozzleZ + 56)
-  k.box(p.gold, cx - 7, cy - 7, nozzleZ + 3, cx + 7, cy + 7, nozzleZ + 9)
-  k.cyl(p.gold, 'z', cx, cy, nozzleZ + 1.5, 3, 3)
-  for (const side of [-1, 1]) {
-    k.box(p.darkGray, cx + side * (hx - 40) - 21, y1 - 70, zt - 62, cx + side * (hx - 40) + 21, y1 - 28, zt - 22)
-  }
+
+  kinematics.home()
+  return kinematics
 }
 
 // ---------------------------------------------------------------------------
@@ -424,25 +678,28 @@ function voron24(k: Kit, p: Palette, v: BuildVolumeMm): void {
 export function buildPrinterModel(kind: PrinterKind, volume: BuildVolumeMm): PrinterModel {
   const kit = new Kit(volume.x / 2, volume.y / 2)
   const pal = palette()
+  let kinematics: PrinterKinematics | undefined
+
   switch (kind) {
     case 'ender3':
-      ender3(kit, pal, volume)
+      kinematics = ender3(kit, pal, volume)
       break
     case 'mk4s':
-      mk4s(kit, pal, volume)
+      kinematics = mk4s(kit, pal, volume)
       break
     case 'bambu-x1c':
-      bambu(kit, pal, volume, 'x1c')
+      kinematics = bambu(kit, pal, volume, 'x1c')
       break
     case 'bambu-p1s':
-      bambu(kit, pal, volume, 'p1s')
+      kinematics = bambu(kit, pal, volume, 'p1s')
       break
     case 'voron-2-4':
-      voron24(kit, pal, volume)
+      kinematics = voron24(kit, pal, volume)
       break
   }
+
   const bounds = new THREE.Box3().setFromObject(kit.group)
-  return { kind, title: TITLES[kind], group: kit.group, bounds }
+  return { kind, title: TITLES[kind], group: kit.group, bounds, kinematics }
 }
 
 export function disposePrinterModel(model: PrinterModel): void {

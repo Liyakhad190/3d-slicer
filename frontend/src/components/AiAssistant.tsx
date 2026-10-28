@@ -118,6 +118,16 @@ export function AiAssistant({ modelVersionId, printerId, materialProfileId, onAp
 
   useEffect(() => { void checkHealth() }, [checkHealth])
 
+  useEffect(() => {
+    if (health && !health.available) {
+      const interval = setInterval(() => {
+        void checkHealth()
+      }, 3500)
+      return () => clearInterval(interval)
+    }
+    return undefined
+  }, [health, checkHealth])
+
   // ---------- temperature range ------------------------------------------
   useEffect(() => {
     if (!printerId || !materialProfileId) { setTempRange(null); return }

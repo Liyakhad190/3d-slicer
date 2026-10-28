@@ -118,7 +118,7 @@ export default function Workbench(): JSX.Element {
   const [aiApplyResult, setAiApplyResult] = useState<AiApply | null>(null)
   const [aiParamsAccepted, setAiParamsAccepted] = useState(false)
 
-  const [mode, setMode] = useState<'model' | 'toolpath'>('model')
+  const [mode, setMode] = useState<'model' | 'toolpath' | 'simulation'>('model')
   const [maxLayer, setMaxLayer] = useState(0)
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -1147,19 +1147,24 @@ export default function Workbench(): JSX.Element {
       {/* ----------------------------- centre ------------------------------ */}
       <div className="flex min-h-0 flex-col gap-3">
         <div className="flex items-center gap-2">
-          {(['model', 'toolpath'] as const).map((m) => (
+          {(['model', 'toolpath', 'simulation'] as const).map((m) => (
             <button
               key={m}
               type="button"
               onClick={() => setMode(m)}
               disabled={m === 'toolpath' && !toolpath}
               className={[
-                'rounded px-3 py-1.5 text-xs font-medium',
-                mode === m ? 'bg-slate-800 text-sky-300' : 'text-slate-500 hover:bg-slate-800/60',
+                'rounded px-3 py-1.5 text-xs font-medium transition flex items-center gap-1.5',
+                mode === m
+                  ? m === 'simulation'
+                    ? 'bg-sky-600 text-white font-semibold shadow'
+                    : 'bg-slate-800 text-sky-300'
+                  : 'text-slate-400 hover:bg-slate-800/60',
                 m === 'toolpath' && !toolpath ? 'cursor-not-allowed opacity-40' : '',
               ].join(' ')}
             >
-              {m === 'model' ? 'Model' : 'Slice Preview'}
+              {m === 'simulation' && <span>⚡</span>}
+              {m === 'model' ? 'Model' : m === 'toolpath' ? 'Slice Preview' : 'Real-Time Simulation'}
             </button>
           ))}
           {mode === 'toolpath' && toolpath && (
@@ -1199,6 +1204,7 @@ export default function Workbench(): JSX.Element {
             onFitToPrinter={() => void fitModelToPrinter(0.70)}
             isTinyModel={isTinyModel}
             isOversizedModel={isOversizedModel}
+            onModeChange={setMode}
           />
         </div>
 

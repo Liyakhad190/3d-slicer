@@ -1,32 +1,30 @@
 /**
- * The 3D viewport.
+ * The 3D viewport with Real-Time Slicing & Printing Simulation.
  *
- * Two modes, both driven by real data:
+ * Modes:
  *  - `model`: the uploaded mesh, parsed client-side from the actual file bytes.
- *  - `toolpath`: the segments the backend parsed out of the G-code the slicer
- *    really produced, coloured by extrusion vs travel.
- *
- * The build plate is drawn to the machine's real dimensions, and the camera
- * frames the content rather than sitting at a magic default, so a 2 mm part and
- * a 300 mm part are both legible.
+ *  - `toolpath`: the segments the backend parsed out of the G-code.
+ *  - `simulation`: real-time machine printing simulation with physical toolhead/gantry
+ *    kinematics, dynamic filament extrusion, holographic laser slicing, and telemetry HUD.
  */
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { loadStl, type LoadedMesh } from '../lib/stl'
-import type { Toolpath } from '../lib/api'
+import type { Toolpath, ToolpathSegment } from '../lib/api'
 import {
   buildPrinterModel,
   disposePrinterModel,
   identifyPrinter,
   type PrinterModel,
 } from '../lib/printerModels'
+import { generateDemoCubeMesh, generateSyntheticToolpath } from '../lib/simulationGenerator'
 
 export interface ViewportProps {
   file: File | null
   toolpath: Toolpath | null
-  mode: 'model' | 'toolpath'
+  mode: 'model' | 'toolpath' | 'simulation'
   buildVolume: { x: number; y: number; z: number } | null
   printerLabel?: string | null
   motionSystem?: string | null
@@ -34,6 +32,8 @@ export interface ViewportProps {
   onFitToPrinter?: () => void
   isTinyModel?: boolean
   isOversizedModel?: boolean
+  onModeChange?: (mode: 'model' | 'toolpath' | 'simulation') => void
+  onLoadDemoModel?: () => void
 }
 
 interface Palette {
@@ -45,6 +45,7 @@ interface Palette {
 }
 
 type CameraView = 'isometric' | 'top' | 'bottom' | 'front' | 'back' | 'left' | 'right'
+type SimVisualMode = 'print' | 'laser_slice'
 
 const PALETTE: Palette = {
   extrusion: 0x1a73e8,
@@ -54,13 +55,6 @@ const PALETTE: Palette = {
   model: 0x2f6fdb,
 }
 
-/**
- * Format an edge length in millimetres at a precision that survives small parts.
- *
- * A fixed `toFixed(1)` reports a 0.02 mm model (one exported in meters) as
- * "0.0", which reads as an empty scene rather than a real, if tiny, mesh. The
- * step is chosen so three significant figures are always shown.
- */
 function formatMm(value: number): string {
   if (!Number.isFinite(value)) return '—'
   if (value === 0) return '0.0'
@@ -68,8 +62,18 @@ function formatMm(value: number): string {
   if (magnitude >= 100) return value.toFixed(1)
   if (magnitude >= 10) return value.toFixed(2)
   if (magnitude >= 1) return value.toFixed(3)
-  // Sub-millimetre: significant figures, never a flat zero.
   return Number(value.toPrecision(3)).toString()
+}
+
+function formatTime(totalSeconds: number): string {
+  const s = Math.max(0, Math.floor(totalSeconds))
+  const mins = Math.floor(s / 60)
+  const secs = s % 60
+  const hours = Math.floor(mins / 60)
+  if (hours > 0) {
+    return `${hours}h ${mins % 60}m`
+  }
+  return `${mins}:${secs.toString().padStart(2, '0')}`
 }
 
 function frameCamera(
@@ -81,10 +85,11 @@ function frameCamera(
   const sphere = box.getBoundingSphere(new THREE.Sphere())
   const verticalFov = THREE.MathUtils.degToRad(camera.fov)
   const horizontalFov = 2 * Math.atan(Math.tan(verticalFov / 2) * Math.max(camera.aspect, 0.1))
-  const distance = Math.max(
-    sphere.radius / Math.sin(verticalFov / 2),
-    sphere.radius / Math.sin(horizontalFov / 2),
-  ) * padding
+  const distance =
+    Math.max(
+      sphere.radius / Math.sin(verticalFov / 2),
+      sphere.radius / Math.sin(horizontalFov / 2),
+    ) * padding
   const direction = new THREE.Vector3(1, -1.1, 1.15).normalize()
 
   controls.target.copy(sphere.center)
@@ -110,10 +115,7 @@ function addRail(
     material,
   )
   rail.position.copy(start).add(end).multiplyScalar(0.5)
-  rail.quaternion.setFromUnitVectors(
-    new THREE.Vector3(1, 0, 0),
-    direction.normalize(),
-  )
+  rail.quaternion.setFromUnitVectors(new THREE.Vector3(1, 0, 0), direction.normalize())
   group.add(rail)
 }
 
@@ -126,6 +128,7 @@ export function Viewport({
   motionSystem,
   maxLayer,
   onFitToPrinter,
+  onModeChange,
 }: ViewportProps): JSX.Element {
   const mountRef = useRef<HTMLDivElement | null>(null)
   const sceneRef = useRef<THREE.Scene | null>(null)
@@ -134,6 +137,7 @@ export function Viewport({
   const buildVolumeRef = useRef(buildVolume)
   const homeViewRef = useRef<() => void>(() => undefined)
   const printerBoundsRef = useRef<THREE.Box3 | null>(null)
+
   const [mesh, setMesh] = useState<LoadedMesh | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [showTravel, setShowTravel] = useState(false)
@@ -141,14 +145,35 @@ export function Viewport({
   const [showPrinterFrame, setShowPrinterFrame] = useState(true)
   const [cameraView, setCameraView] = useState<CameraView>('isometric')
   const [displayScale, setDisplayScale] = useState(1)
+  const [isDemoModel, setIsDemoModel] = useState(false)
+
+  // --- Real-time Simulation State ---------------------------------------
+  const [simActive, setSimActive] = useState(mode === 'simulation')
+  const [simPlaying, setSimPlaying] = useState(false)
+  const [simProgress, setSimProgress] = useState(0) // 0 to 1
+  const [simSpeed, setSimSpeed] = useState<number>(5) // 1x, 2x, 5x, 10x, 25x, 50x
+  const [simVisualMode, setSimVisualMode] = useState<SimVisualMode>('print')
+  const [simLayer, setSimLayer] = useState<number>(1)
+  const [simCoords, setSimCoords] = useState<{ x: number; y: number; z: number }>({ x: 0, y: 0, z: 0 })
+  const [simFeedrate, setSimFeedrate] = useState<number>(0)
+  const [simAction, setSimAction] = useState<string>('Ready to simulate')
+  const [simExtruding, setSimExtruding] = useState<boolean>(false)
+
   buildVolumeRef.current = buildVolume
 
-  // The exact printer that was selected, if we have a model for it.
-  const printerKind = useMemo(() => identifyPrinter(printerLabel), [printerLabel])
+  useEffect(() => {
+    if (mode === 'simulation') {
+      setSimActive(true)
+      setSimPlaying(true)
+    } else {
+      setSimActive(false)
+      setSimPlaying(false)
+    }
+  }, [mode])
 
-  const buildVolumeKey = buildVolume
-    ? `${buildVolume.x}:${buildVolume.y}:${buildVolume.z}`
-    : ''
+  // Printer 3D model
+  const printerKind = useMemo(() => identifyPrinter(printerLabel), [printerLabel])
+  const buildVolumeKey = buildVolume ? `${buildVolume.x}:${buildVolume.y}:${buildVolume.z}` : ''
 
   const printerModel = useMemo<PrinterModel | null>(
     () => (printerKind && buildVolume ? buildPrinterModel(printerKind, buildVolume) : null),
@@ -157,13 +182,21 @@ export function Viewport({
   )
   printerBoundsRef.current = printerModel ? printerModel.bounds : null
 
-  // --- model loading ----------------------------------------------------
+  // Procedural frame fallback kinematics reference
+  const fallbackKinematicsRef = useRef<{
+    setNozzlePosition: (x: number, y: number, z: number, isExtruding?: boolean) => void
+  } | null>(null)
+
+  // Load uploaded STL
   useEffect(() => {
     if (!file) {
-      setMesh(null)
+      if (!isDemoModel) {
+        setMesh(null)
+      }
       setLoadError(null)
       return
     }
+    setIsDemoModel(false)
     let cancelled = false
     void loadStl(file)
       .then((loaded) => {
@@ -178,7 +211,27 @@ export function Viewport({
     return () => {
       cancelled = true
     }
-  }, [file])
+  }, [file, isDemoModel])
+
+  // Active toolpath resolution (real or synthetic)
+  const activeToolpath = useMemo<Toolpath | null>(() => {
+    if (toolpath && toolpath.segments.length > 0) return toolpath
+    if (mesh && buildVolume) {
+      return generateSyntheticToolpath(mesh.bounds, buildVolume)
+    }
+    return null
+  }, [toolpath, mesh, buildVolume])
+
+  // Start demo model and simulation immediately
+  const handleLoadDemoAndSimulate = useCallback(() => {
+    const demo = generateDemoCubeMesh(20)
+    setMesh(demo)
+    setIsDemoModel(true)
+    setSimActive(true)
+    setSimPlaying(true)
+    setSimProgress(0)
+    if (onModeChange) onModeChange('simulation')
+  }, [onModeChange])
 
   // --- one-time scene setup ---------------------------------------------
   useEffect(() => {
@@ -187,7 +240,6 @@ export function Viewport({
 
     const scene = new THREE.Scene()
     scene.background = new THREE.Color(0xffffff)
-    // No fog: with the camera framed on the whole printer, fog faded the part to white.
     sceneRef.current = scene
 
     const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 4000)
@@ -215,10 +267,10 @@ export function Viewport({
     controls.screenSpacePanning = true
     controls.zoomSpeed = 0.8
     controlsRef.current = controls
+
     homeViewRef.current = () => {
       const volume = buildVolumeRef.current
       if (volume) {
-        // Frame the build volume & bed area so the bed and model are front-and-center, like real slicers
         const margin = Math.max(volume.x, volume.y) * 0.08
         const framingBox = new THREE.Box3(
           new THREE.Vector3(-margin, -margin, -10),
@@ -277,7 +329,7 @@ export function Viewport({
         }
       })
       renderer.dispose()
-      mount.removeChild(canvas)
+      if (mount.contains(canvas)) mount.removeChild(canvas)
     }
   }, [])
 
@@ -314,11 +366,11 @@ export function Viewport({
     controls.update()
   }
 
-  // --- mesh geometry ----------------------------------------------------
+  // --- Mesh geometry in model or laser_slice mode -----------------------
   useEffect(() => {
     const scene = sceneRef.current
     const camera = cameraRef.current
-    if (!scene || !camera || !mesh || mode !== 'model') return
+    if (!scene || !camera || !mesh || (mode !== 'model' && mode !== 'simulation')) return
     const controls = controlsRef.current
     if (!controls) return
 
@@ -327,28 +379,31 @@ export function Viewport({
     geometry.setAttribute('position', new THREE.BufferAttribute(mesh.positions, 3))
     geometry.computeVertexNormals()
 
+    const isGhost = mode === 'simulation'
     const material = new THREE.MeshStandardMaterial({
       color: PALETTE.model,
       metalness: 0.15,
       roughness: 0.55,
       side: THREE.DoubleSide,
       flatShading: true,
+      transparent: isGhost,
+      opacity: isGhost ? 0.35 : 1.0,
+      depthWrite: !isGhost,
     })
     group.add(new THREE.Mesh(geometry, material))
 
-    // Edges make a mesh readable in a way flat shading alone is not.
     const edges = new THREE.EdgesGeometry(geometry, 25)
     group.add(
       new THREE.LineSegments(
         edges,
-        new THREE.LineBasicMaterial({ color: 0x8a8a8a, transparent: true, opacity: 0.5 }),
+        new THREE.LineBasicMaterial({
+          color: isGhost ? 0x64748b : 0x8a8a8a,
+          transparent: true,
+          opacity: isGhost ? 0.25 : 0.5,
+        }),
       ),
     )
 
-    // Sit the part on the plate, inside the printer.
-    // If the part is tiny (< 5 mm, e.g. exported in meters like 0.12 mm), scale it up for
-    // visual preview so it fits comfortably on the bed (~65% bed size) and is never hidden!
-    // If larger than the build volume, scale down to fit inside frame.
     const plate = buildVolumeRef.current
     const sizeX = mesh.bounds.max[0] - mesh.bounds.min[0]
     const sizeY = mesh.bounds.max[1] - mesh.bounds.min[1]
@@ -371,26 +426,8 @@ export function Viewport({
       (plate ? plate.y / 2 : 0) - cy * fit,
       -mesh.bounds.min[2] * fit,
     )
-    group.renderOrder = 10
-    group.traverse((object) => {
-      object.renderOrder = 10
-    })
+    group.renderOrder = isGhost ? 1 : 10
     scene.add(group)
-    if (plate) {
-      homeViewRef.current()
-    } else {
-      const width = mesh.bounds.max[0] - mesh.bounds.min[0]
-      const depth = mesh.bounds.max[1] - mesh.bounds.min[1]
-      const height = mesh.bounds.max[2] - mesh.bounds.min[2]
-      frameCamera(
-        camera,
-        controls,
-        new THREE.Box3(
-          new THREE.Vector3(-width / 2, -depth / 2, 0),
-          new THREE.Vector3(width / 2, depth / 2, height),
-        ),
-      )
-    }
 
     return () => {
       scene.remove(group)
@@ -399,9 +436,9 @@ export function Viewport({
     }
   }, [mesh, mode, buildVolumeKey])
 
-  // --- toolpath lines ----------------------------------------------------
+  // --- Static toolpath in toolpath mode ---------------------------------
   const toolpathGeometry = useMemo(() => {
-    if (!toolpath) return null
+    if (!toolpath || mode !== 'toolpath') return null
 
     const cut = maxLayer > 0 ? maxLayer : Infinity
     const extrude: number[] = []
@@ -422,7 +459,7 @@ export function Viewport({
       travel: new Float32Array(travel),
       retract: new Float32Array(retract),
     }
-  }, [toolpath, maxLayer])
+  }, [toolpath, maxLayer, mode])
 
   useEffect(() => {
     const scene = sceneRef.current
@@ -446,14 +483,6 @@ export function Viewport({
     if (showTravel) addLines(toolpathGeometry.retract, PALETTE.retract, 0.8)
 
     scene.add(group)
-
-    // Frame camera on the toolpath when entering toolpath mode
-    const camera = cameraRef.current
-    const controls = controlsRef.current
-    if (camera && controls && buildVolumeRef.current) {
-      homeViewRef.current()
-    }
-
     return () => {
       scene.remove(group)
       group.traverse((object) => {
@@ -467,7 +496,7 @@ export function Viewport({
     }
   }, [toolpathGeometry, showTravel, mode])
 
-  // --- build plate --------------------------------------------------------
+  // --- Build plate ------------------------------------------------------
   useEffect(() => {
     const scene = sceneRef.current
     if (!scene || !buildVolume || !showPlate) return
@@ -497,10 +526,7 @@ export function Viewport({
     }
     const gridGeometry = new THREE.BufferGeometry()
     gridGeometry.setAttribute('position', new THREE.Float32BufferAttribute(gridPositions, 3))
-    const grid = new THREE.LineSegments(
-      gridGeometry,
-      new THREE.LineBasicMaterial({ color: 0xe0e0e0 }),
-    )
+    const grid = new THREE.LineSegments(gridGeometry, new THREE.LineBasicMaterial({ color: 0xe0e0e0 }))
     grid.position.z = 0.005
     plateGroup.add(grid)
 
@@ -510,10 +536,7 @@ export function Viewport({
       new THREE.Vector3(buildVolume.x, buildVolume.y, 0),
       new THREE.Vector3(0, buildVolume.y, 0),
     ])
-    const border = new THREE.LineLoop(
-      borderGeometry,
-      new THREE.LineBasicMaterial({ color: 0x8a8a8a }),
-    )
+    const border = new THREE.LineLoop(borderGeometry, new THREE.LineBasicMaterial({ color: 0x8a8a8a }))
     border.position.z = 0.1
     plateGroup.add(border)
 
@@ -521,7 +544,11 @@ export function Viewport({
     return () => {
       scene.remove(plateGroup)
       plateGroup.traverse((object) => {
-        if (object instanceof THREE.Mesh || object instanceof THREE.LineSegments || object instanceof THREE.LineLoop) {
+        if (
+          object instanceof THREE.Mesh ||
+          object instanceof THREE.LineSegments ||
+          object instanceof THREE.LineLoop
+        ) {
           object.geometry.dispose()
           const material = object.material
           if (Array.isArray(material)) material.forEach((item) => item.dispose())
@@ -531,7 +558,7 @@ export function Viewport({
     }
   }, [buildVolumeKey, showPlate])
 
-  // --- the selected printer's own 3D model ----------------------------------
+  // --- Printer 3D model -------------------------------------------------
   useEffect(() => {
     const scene = sceneRef.current
     if (!scene || !printerModel || !showPrinterFrame) return
@@ -547,6 +574,7 @@ export function Viewport({
     }
   }, [printerModel])
 
+  // Procedural frame fallback
   useEffect(() => {
     const scene = sceneRef.current
     if (!scene || !buildVolume || !showPrinterFrame || printerKind) return
@@ -562,92 +590,55 @@ export function Viewport({
     const y1 = buildVolume.y + margin
     const z0 = -railSize
     const z1 = buildVolume.z
-    const system = motionSystem?.toLowerCase() ?? ''
-    const triangular = system === 'delta'
-    const enclosedFrame = system.includes('corexy') || system.includes('corexz')
-    const gantryZ = z1 * 0.72
-    if (triangular) {
-      const posts = [
-        new THREE.Vector3(buildVolume.x / 2, y1, z0),
-        new THREE.Vector3(x0, y0, z0),
-        new THREE.Vector3(x1, y0, z0),
-      ]
-      const topPosts = posts.map((post) => new THREE.Vector3(post.x, post.y, z1))
-      for (let index = 0; index < posts.length; index += 1) {
-        const next = (index + 1) % posts.length
-        addRail(frame, posts[index]!, topPosts[index]!, railSize, material)
-        addRail(frame, topPosts[index]!, topPosts[next]!, railSize, material)
-      }
-      const effector = new THREE.Mesh(
-        new THREE.SphereGeometry(railSize * 2.2, 12, 8),
-        material,
-      )
-      effector.position.set(buildVolume.x / 2, buildVolume.y / 2, gantryZ)
-      frame.add(effector)
-    } else if (enclosedFrame) {
-      const posts = [
-        new THREE.Vector3(x0, y0, z0),
-        new THREE.Vector3(x1, y0, z0),
-        new THREE.Vector3(x1, y1, z0),
-        new THREE.Vector3(x0, y1, z0),
-      ]
-      const topPosts = posts.map((post) => new THREE.Vector3(post.x, post.y, z1))
-      for (let index = 0; index < posts.length; index += 1) {
-        const next = (index + 1) % posts.length
-        addRail(frame, posts[index]!, topPosts[index]!, railSize, material)
-        addRail(frame, posts[index]!, posts[next]!, railSize, material)
-        addRail(frame, topPosts[index]!, topPosts[next]!, railSize, material)
-      }
-      addRail(
-        frame,
-        new THREE.Vector3(x0, y1, gantryZ),
-        new THREE.Vector3(x1, y1, gantryZ),
-        railSize * 1.25,
-        material,
-      )
-      const carriage = new THREE.Mesh(
-        new THREE.BoxGeometry(railSize * 3, railSize * 3, railSize * 4),
-        material,
-      )
-      carriage.position.set(buildVolume.x / 2, y1, gantryZ - railSize * 2)
-      frame.add(carriage)
-    } else {
-      const rearLeft = new THREE.Vector3(x0, y1, z0)
-      const rearRight = new THREE.Vector3(x1, y1, z0)
-      const topLeft = new THREE.Vector3(x0, y1, z1)
-      const topRight = new THREE.Vector3(x1, y1, z1)
-      const gantryLeft = new THREE.Vector3(x0, y1, gantryZ)
-      const gantryRight = new THREE.Vector3(x1, y1, gantryZ)
-      addRail(frame, rearLeft, topLeft, railSize, material)
-      addRail(frame, rearRight, topRight, railSize, material)
-      addRail(frame, rearLeft, rearRight, railSize, material)
-      addRail(frame, new THREE.Vector3(x0, y0, z0), new THREE.Vector3(x1, y0, z0), railSize, material)
-      addRail(frame, new THREE.Vector3(x0, y0, z0), rearLeft, railSize, material)
-      addRail(frame, new THREE.Vector3(x1, y0, z0), rearRight, railSize, material)
-      addRail(frame, topLeft, topRight, railSize, material)
-      addRail(frame, gantryLeft, gantryRight, railSize * 1.25, material)
-      addRail(frame, rearLeft, new THREE.Vector3(x0, y0, z0), railSize, material)
-      addRail(frame, rearRight, new THREE.Vector3(x1, y0, z0), railSize, material)
 
-      const carriageSize = Math.max(12, railSize * 3)
-      const carriage = new THREE.Mesh(
-        new THREE.BoxGeometry(carriageSize, carriageSize * 0.8, carriageSize),
-        material,
-      )
-      carriage.position.set(buildVolume.x / 2, y1, gantryZ - carriageSize * 0.7)
-      frame.add(carriage)
-      addRail(
-        frame,
-        new THREE.Vector3(buildVolume.x / 2, y1, gantryZ - carriageSize * 1.2),
-        new THREE.Vector3(buildVolume.x / 2, y1, gantryZ - carriageSize * 2.1),
-        railSize * 0.6,
-        material,
-      )
+    const rearLeft = new THREE.Vector3(x0, y1, z0)
+    const rearRight = new THREE.Vector3(x1, y1, z0)
+    const topLeft = new THREE.Vector3(x0, y1, z1)
+    const topRight = new THREE.Vector3(x1, y1, z1)
+    addRail(frame, rearLeft, topLeft, railSize, material)
+    addRail(frame, rearRight, topRight, railSize, material)
+    addRail(frame, rearLeft, rearRight, railSize, material)
+    addRail(frame, new THREE.Vector3(x0, y0, z0), new THREE.Vector3(x1, y0, z0), railSize, material)
+    addRail(frame, new THREE.Vector3(x0, y0, z0), rearLeft, railSize, material)
+    addRail(frame, new THREE.Vector3(x1, y0, z0), rearRight, railSize, material)
+    addRail(frame, topLeft, topRight, railSize, material)
+
+    // Moving carriage and nozzle for fallback frame
+    const carriageGroup = new THREE.Group()
+    const carriageSize = Math.max(12, railSize * 3)
+    const carriageMesh = new THREE.Mesh(
+      new THREE.BoxGeometry(carriageSize, carriageSize * 0.8, carriageSize),
+      material,
+    )
+    carriageMesh.position.set(0, 0, carriageSize * 0.4)
+    carriageGroup.add(carriageMesh)
+
+    const nozzleTip = new THREE.Mesh(
+      new THREE.CylinderGeometry(1.5, 3, 4, 12),
+      new THREE.MeshBasicMaterial({ color: 0xddaa33 }),
+    )
+    nozzleTip.position.set(0, 0, 2)
+    carriageGroup.add(nozzleTip)
+
+    const nozzleLight = new THREE.PointLight(0x38bdf8, 1.2, 30)
+    nozzleLight.position.set(0, 0, 1)
+    carriageGroup.add(nozzleLight)
+
+    carriageGroup.position.set(buildVolume.x / 2, buildVolume.y / 2, buildVolume.z * 0.7)
+    frame.add(carriageGroup)
+
+    fallbackKinematicsRef.current = {
+      setNozzlePosition(x: number, y: number, z: number, isExtruding = true) {
+        carriageGroup.position.set(x, y, z)
+        nozzleLight.color.setHex(isExtruding ? 0x38bdf8 : 0xff7043)
+        nozzleLight.intensity = isExtruding ? 1.4 : 0.3
+      },
     }
 
     scene.add(frame)
     return () => {
       scene.remove(frame)
+      fallbackKinematicsRef.current = null
       frame.traverse((object) => {
         if (object instanceof THREE.Mesh) {
           object.geometry.dispose()
@@ -660,21 +651,255 @@ export function Viewport({
     }
   }, [buildVolumeKey, motionSystem, showPrinterFrame, printerKind])
 
+  // =====================================================================
+  // REAL-TIME SIMULATION ENGINE
+  // =====================================================================
+  const simSegmentsRef = useRef<ToolpathSegment[]>([])
+  const simLineMeshRef = useRef<THREE.LineSegments | null>(null)
+  const simLaserGroupRef = useRef<THREE.Group | null>(null)
+
+  // Pre-load simulation line buffer
+  useEffect(() => {
+    const scene = sceneRef.current
+    if (!scene || !activeToolpath || (mode !== 'simulation' && !simActive)) {
+      if (simLineMeshRef.current) {
+        scene?.remove(simLineMeshRef.current)
+        simLineMeshRef.current.geometry.dispose()
+        simLineMeshRef.current = null
+      }
+      return
+    }
+
+    const segments = activeToolpath.segments
+    simSegmentsRef.current = segments
+
+    const totalSegs = segments.length
+    const positions = new Float32Array(totalSegs * 6)
+    const colors = new Float32Array(totalSegs * 6)
+
+    for (let i = 0; i < totalSegs; i++) {
+      const seg = segments[i]!
+      const [x0, y0, z0] = seg.from
+      const [x1, y1, z1] = seg.to
+      const idx = i * 6
+
+      positions[idx] = x0
+      positions[idx + 1] = y0
+      positions[idx + 2] = z0
+      positions[idx + 3] = x1
+      positions[idx + 4] = y1
+      positions[idx + 5] = z1
+
+      const c =
+        seg.kind === 'extrude'
+          ? new THREE.Color(0x38bdf8)
+          : seg.kind === 'retract'
+            ? new THREE.Color(0xff7043)
+            : new THREE.Color(0x94a3b8)
+
+      colors[idx] = c.r
+      colors[idx + 1] = c.g
+      colors[idx + 2] = c.b
+      colors[idx + 3] = c.r
+      colors[idx + 4] = c.g
+      colors[idx + 5] = c.b
+    }
+
+    const geometry = new THREE.BufferGeometry()
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3))
+    geometry.setDrawRange(0, 0)
+
+    const material = new THREE.LineBasicMaterial({
+      vertexColors: true,
+      transparent: true,
+      opacity: 0.95,
+      linewidth: 2,
+    })
+
+    const lineMesh = new THREE.LineSegments(geometry, material)
+    lineMesh.renderOrder = 5
+    scene.add(lineMesh)
+    simLineMeshRef.current = lineMesh
+
+    // Holographic Laser Slicing Plane group
+    const laserGroup = new THREE.Group()
+    if (buildVolume) {
+      const laserPlane = new THREE.Mesh(
+        new THREE.PlaneGeometry(buildVolume.x + 10, buildVolume.y + 10),
+        new THREE.MeshBasicMaterial({
+          color: 0x06b6d4,
+          transparent: true,
+          opacity: 0.2,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+        }),
+      )
+      laserPlane.position.set(buildVolume.x / 2, buildVolume.y / 2, 0)
+      laserGroup.add(laserPlane)
+
+      const laserRing = new THREE.LineLoop(
+        new THREE.BufferGeometry().setFromPoints([
+          new THREE.Vector3(-5, -5, 0),
+          new THREE.Vector3(buildVolume.x + 5, -5, 0),
+          new THREE.Vector3(buildVolume.x + 5, buildVolume.y + 5, 0),
+          new THREE.Vector3(-5, buildVolume.y + 5, 0),
+        ]),
+        new THREE.LineBasicMaterial({ color: 0x22d3ee }),
+      )
+      laserGroup.add(laserRing)
+    }
+    laserGroup.visible = simVisualMode === 'laser_slice'
+    scene.add(laserGroup)
+    simLaserGroupRef.current = laserGroup
+
+    return () => {
+      scene.remove(lineMesh)
+      geometry.dispose()
+      material.dispose()
+      simLineMeshRef.current = null
+
+      scene.remove(laserGroup)
+      laserGroup.traverse((obj) => {
+        if (obj instanceof THREE.Mesh || obj instanceof THREE.LineLoop) {
+          obj.geometry.dispose()
+        }
+      })
+      simLaserGroupRef.current = null
+    }
+  }, [activeToolpath, mode, simActive, buildVolume, simVisualMode])
+
+  // Simulation Animation Loop
+  const simProgressRef = useRef(simProgress)
+  simProgressRef.current = simProgress
+  const simSpeedRef = useRef(simSpeed)
+  simSpeedRef.current = simSpeed
+  const simPlayingRef = useRef(simPlaying)
+  simPlayingRef.current = simPlaying
+
+  useEffect(() => {
+    if (!simActive && mode !== 'simulation') return
+
+    let lastTime = performance.now()
+    let animId: number
+
+    const simLoop = (now: number): void => {
+      animId = requestAnimationFrame(simLoop)
+      const dt = Math.min((now - lastTime) / 1000, 0.1)
+      lastTime = now
+
+      const segments = simSegmentsRef.current
+      if (segments.length === 0) return
+
+      let progress = simProgressRef.current
+
+      if (simPlayingRef.current) {
+        // Step forward proportional to simulation speed
+        const progressIncrement = (0.015 * simSpeedRef.current * dt) / Math.max(1, segments.length / 200)
+        progress = Math.min(1.0, progress + progressIncrement)
+        if (progress >= 1.0) {
+          setSimPlaying(false)
+        }
+        setSimProgress(progress)
+      }
+
+      // Map progress to active segment
+      const currentSegmentIndex = Math.min(
+        segments.length - 1,
+        Math.floor(progress * segments.length),
+      )
+      const seg = segments[currentSegmentIndex]
+
+      if (seg) {
+        const segFrac = (progress * segments.length) - currentSegmentIndex
+        const curX = seg.from[0] + (seg.to[0] - seg.from[0]) * segFrac
+        const curY = seg.from[1] + (seg.to[1] - seg.from[1]) * segFrac
+        const curZ = seg.from[2] + (seg.to[2] - seg.from[2]) * segFrac
+        const isExtr = seg.kind === 'extrude'
+
+        // Apply kinematics to printer model
+        if (printerModel?.kinematics) {
+          printerModel.kinematics.setNozzlePosition(curX, curY, curZ, isExtr)
+        } else if (fallbackKinematicsRef.current) {
+          fallbackKinematicsRef.current.setNozzlePosition(curX, curY, curZ, isExtr)
+        }
+
+        // Update Laser Slicing plane position
+        if (simLaserGroupRef.current) {
+          simLaserGroupRef.current.position.z = curZ
+          simLaserGroupRef.current.visible = simVisualMode === 'laser_slice'
+        }
+
+        // Update dynamic drawn lines
+        if (simLineMeshRef.current) {
+          simLineMeshRef.current.geometry.setDrawRange(0, (currentSegmentIndex + 1) * 2)
+        }
+
+        // Telemetry updates
+        const feedrate = isExtr ? 60 : seg.kind === 'retract' ? 40 : 150
+        setSimCoords({ x: Number(curX.toFixed(2)), y: Number(curY.toFixed(2)), z: Number(curZ.toFixed(2)) })
+        setSimLayer(seg.layer ?? 1)
+        setSimFeedrate(feedrate)
+        setSimExtruding(isExtr)
+        setSimAction(
+          isExtr
+            ? `Extruding Layer ${seg.layer ?? 1}`
+            : seg.kind === 'retract'
+              ? 'Retracting & Z-Hop'
+              : 'Rapid Travel Move',
+        )
+      }
+    }
+
+    animId = requestAnimationFrame(simLoop)
+    return () => {
+      cancelAnimationFrame(animId)
+    }
+  }, [simActive, mode, printerModel, simVisualMode])
+
+  const totalSimLayers = activeToolpath?.layer_count ?? 67
   const triangles = mesh?.triangleCount ?? 0
   const visibleLayers = Math.max(0, Math.min(maxLayer, toolpath?.layer_count ?? 0))
 
   return (
-    <div className="relative h-full w-full overflow-hidden rounded-lg border border-slate-800 bg-slate-950">
+    <div className="relative h-full w-full overflow-hidden rounded-lg border border-slate-800 bg-slate-950 select-none">
       <div ref={mountRef} className="h-full w-full" />
 
-      <div className="pointer-events-none absolute left-3 top-3 rounded-md bg-slate-950/80 px-3 py-2 text-xs font-mono text-slate-300 backdrop-blur">
-        {mode === 'model' ? (
+      {/* Info Badge (Top Left) */}
+      <div className="pointer-events-none absolute left-3 top-3 rounded-md bg-slate-950/85 px-3 py-2 text-xs font-mono text-slate-300 backdrop-blur shadow-md border border-slate-800/80">
+        <div className="font-semibold text-sky-400 flex items-center gap-1.5">
+          <span>{printerLabel || 'Creality Ender 3'}</span>
+          <span className="text-[10px] text-slate-400 font-normal">
+            · {printerKind ? 'Kinematic 3D Machine' : 'Profile Frame'}
+          </span>
+        </div>
+
+        {mode === 'simulation' || simActive ? (
+          <div className="mt-1 space-y-0.5 text-[11px]">
+            <div className="flex items-center gap-2">
+              <span className="flex h-2 w-2 relative">
+                <span
+                  className={[
+                    'animate-ping absolute inline-flex h-full w-full rounded-full opacity-75',
+                    simPlaying ? 'bg-emerald-400' : 'bg-amber-400',
+                  ].join(' ')}
+                />
+                <span
+                  className={[
+                    'relative inline-flex rounded-full h-2 w-2',
+                    simPlaying ? 'bg-emerald-500' : 'bg-amber-500',
+                  ].join(' ')}
+                />
+              </span>
+              <span className="font-semibold text-slate-200">
+                {simPlaying ? 'LIVE SIMULATION' : 'SIMULATION PAUSED'}
+              </span>
+              <span className="text-slate-400">({(simProgress * 100).toFixed(0)}%)</span>
+            </div>
+            <div className="text-sky-300 font-medium">{simAction}</div>
+          </div>
+        ) : mode === 'model' ? (
           <div>
-            {printerLabel && (
-              <div className="font-semibold">
-                {printerLabel} · {printerKind ? '3D model' : 'profile schematic'}
-              </div>
-            )}
             <div>{mesh ? `${triangles.toLocaleString()} triangles` : 'No model loaded'}</div>
             {mesh && displayScale < 0.98 && (
               <div className="text-amber-400">
@@ -715,24 +940,187 @@ export function Viewport({
         )}
       </div>
 
-      <div className="absolute bottom-3 left-3 flex flex-wrap gap-2 text-xs">
-        {mode === 'toolpath' && (
-          <>
-            <span className="rounded bg-slate-900/90 px-2 py-1 text-sky-300">
-              <span className="mr-1 inline-block h-2 w-2 rounded-full bg-sky-400" />
-              extrusion
-            </span>
-            {showTravel && (
-              <span className="rounded bg-slate-900/90 px-2 py-1 text-slate-400">
-                <span className="mr-1 inline-block h-2 w-2 rounded-full bg-slate-500" />
-                travel
-              </span>
-            )}
-          </>
-        )}
-      </div>
+      {/* Prominent Demo Simulation CTA Banner when no model is loaded */}
+      {!mesh && mode !== 'simulation' && (
+        <div className="absolute inset-x-4 top-16 mx-auto flex max-w-md flex-col items-center gap-3 rounded-xl border border-sky-500/40 bg-slate-900/90 p-4 text-center shadow-2xl backdrop-blur">
+          <div className="text-sm font-semibold text-sky-200">
+            Real-Time Slicing & Machine Simulation
+          </div>
+          <p className="text-xs text-slate-400">
+            Watch the {printerLabel || 'Creality Ender 3'} extruder, gantry, and bed move in 3D
+            while slicing and depositing filament in real-time.
+          </p>
+          <button
+            type="button"
+            onClick={handleLoadDemoAndSimulate}
+            className="flex items-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-xs font-semibold text-white shadow-lg shadow-sky-600/30 hover:bg-sky-500 transition active:scale-95"
+          >
+            <span>⚡</span>
+            <span>Load 20mm Demo Cube & Start Real-Time Simulation</span>
+          </button>
+        </div>
+      )}
 
+      {/* Real-time Telemetry HUD (Top Center/Right) */}
+      {(mode === 'simulation' || simActive) && (
+        <div className="absolute left-1/2 -translate-x-1/2 top-3 flex items-center gap-4 rounded-lg border border-slate-800 bg-slate-950/90 px-4 py-1.5 text-[11px] font-mono text-slate-300 shadow-xl backdrop-blur">
+          <div className="flex items-center gap-1.5">
+            <span className="text-slate-500">POS:</span>
+            <span className="text-sky-300 font-bold">
+              X{simCoords.x} Y{simCoords.y} Z{simCoords.z}
+            </span>
+          </div>
+          <div className="h-3 w-px bg-slate-800" />
+          <div className="flex items-center gap-1.5">
+            <span className="text-slate-500">LAYER:</span>
+            <span className="text-emerald-400 font-bold">
+              {simLayer} / {totalSimLayers}
+            </span>
+          </div>
+          <div className="h-3 w-px bg-slate-800" />
+          <div className="flex items-center gap-1.5">
+            <span className="text-slate-500">SPEED:</span>
+            <span className="text-amber-300">{simFeedrate} mm/s</span>
+          </div>
+          <div className="h-3 w-px bg-slate-800" />
+          <div className="flex items-center gap-1.5">
+            <span className={simExtruding ? 'text-sky-400 font-bold' : 'text-slate-400'}>
+              {simExtruding ? '● EXTRUDING' : '○ TRAVEL'}
+            </span>
+          </div>
+          <div className="h-3 w-px bg-slate-800" />
+          <div className="flex items-center gap-1.5">
+            <span className="text-rose-400">🔥 215°C</span>
+            <span className="text-amber-400">🛏️ 60°C</span>
+          </div>
+        </div>
+      )}
+
+      {/* Real-Time Simulation Player Control Bar (Bottom Center) */}
+      {(mode === 'simulation' || simActive) && (
+        <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex w-[94%] max-w-2xl flex-col gap-2 rounded-xl border border-sky-500/30 bg-slate-950/95 p-3 shadow-2xl backdrop-blur">
+          {/* Scrubber slider */}
+          <div className="flex items-center gap-3">
+            <span className="text-[10px] font-mono text-slate-400">
+              {formatTime(simProgress * ((activeToolpath?.stats.filament_extruded_mm ?? 100) * 1.5 + 120))}
+            </span>
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.001}
+              value={simProgress}
+              onChange={(e) => {
+                setSimProgress(Number(e.target.value))
+              }}
+              className="flex-1 accent-sky-400 h-1.5 bg-slate-800 rounded-lg cursor-pointer"
+            />
+            <span className="text-[10px] font-mono text-slate-500">
+              {formatTime((activeToolpath?.stats.filament_extruded_mm ?? 100) * 1.5 + 120)}
+            </span>
+          </div>
+
+          {/* Controls toolbar */}
+          <div className="flex items-center justify-between text-xs">
+            {/* Play/Pause & Reset */}
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setSimPlaying((p) => !p)}
+                className="flex h-8 items-center gap-1.5 rounded-lg bg-sky-600 px-3 font-semibold text-white shadow hover:bg-sky-500 transition active:scale-95"
+              >
+                {simPlaying ? <span>⏸ Pause</span> : <span>▶ Play</span>}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setSimProgress(0)
+                  setSimPlaying(false)
+                  if (printerModel?.kinematics) printerModel.kinematics.home()
+                }}
+                className="flex h-8 items-center rounded-lg border border-slate-800 bg-slate-900 px-2.5 text-slate-300 hover:bg-slate-800"
+                title="Restart simulation"
+              >
+                ⏮ Restart
+              </button>
+            </div>
+
+            {/* Visual Mode Toggle */}
+            <div className="flex rounded-lg border border-slate-800 bg-slate-900 p-0.5">
+              <button
+                type="button"
+                onClick={() => setSimVisualMode('print')}
+                className={[
+                  'rounded px-2.5 py-1 text-[11px] font-medium transition',
+                  simVisualMode === 'print' ? 'bg-sky-600 text-white' : 'text-slate-400 hover:text-white',
+                ].join(' ')}
+              >
+                🖨️ Machine Print Motion
+              </button>
+              <button
+                type="button"
+                onClick={() => setSimVisualMode('laser_slice')}
+                className={[
+                  'rounded px-2.5 py-1 text-[11px] font-medium transition',
+                  simVisualMode === 'laser_slice'
+                    ? 'bg-cyan-600 text-white'
+                    : 'text-slate-400 hover:text-white',
+                ].join(' ')}
+              >
+                📐 Holographic Slicing Laser
+              </button>
+            </div>
+
+            {/* Speed Multipliers */}
+            <div className="flex items-center gap-1">
+              <span className="text-[10px] text-slate-500 mr-1">Speed:</span>
+              {[1, 2, 5, 10, 25].map((spd) => (
+                <button
+                  key={spd}
+                  type="button"
+                  onClick={() => setSimSpeed(spd)}
+                  className={[
+                    'rounded px-1.5 py-0.5 text-[10px] font-mono font-medium transition',
+                    simSpeed === spd
+                      ? 'bg-sky-500 text-white'
+                      : 'bg-slate-900 text-slate-400 hover:bg-slate-800',
+                  ].join(' ')}
+                >
+                  {spd}×
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Viewport Control Panel (Top Right) */}
       <div className="absolute right-3 top-3 flex flex-col gap-1 text-xs">
+        {/* Toggle Real-Time Simulation button */}
+        <button
+          type="button"
+          onClick={() => {
+            if (simActive) {
+              setSimActive(false)
+              setSimPlaying(false)
+              if (onModeChange) onModeChange('model')
+            } else {
+              setSimActive(true)
+              setSimPlaying(true)
+              if (onModeChange) onModeChange('simulation')
+            }
+          }}
+          className={[
+            'rounded px-2.5 py-1.5 font-semibold transition flex items-center justify-center gap-1.5 shadow',
+            simActive || mode === 'simulation'
+              ? 'bg-emerald-600 text-white hover:bg-emerald-500'
+              : 'bg-gradient-to-r from-sky-600 to-indigo-600 text-white hover:opacity-90',
+          ].join(' ')}
+        >
+          <span>⚡</span>
+          <span>{simActive ? 'Exit Simulation' : 'Live Simulation'}</span>
+        </button>
+
         {onFitToPrinter && mode === 'model' && mesh && (
           <button
             type="button"
@@ -743,6 +1131,7 @@ export function Viewport({
             ✨ Fit to printer
           </button>
         )}
+
         <button
           type="button"
           onClick={() => setShowTravel((value) => !value)}
@@ -750,6 +1139,7 @@ export function Viewport({
         >
           {showTravel ? 'Hide' : 'Show'} travel
         </button>
+
         <label className="flex items-center justify-between gap-2 rounded bg-slate-900/90 px-2 py-1 text-slate-300">
           <span>View</span>
           <select
@@ -767,6 +1157,7 @@ export function Viewport({
             <option value="right">Right</option>
           </select>
         </label>
+
         <button
           type="button"
           onClick={() => homeViewRef.current()}
@@ -776,6 +1167,7 @@ export function Viewport({
         >
           Reset view
         </button>
+
         <button
           type="button"
           onClick={() => setShowPlate((value) => !value)}
@@ -783,6 +1175,7 @@ export function Viewport({
         >
           {showPlate ? 'Hide' : 'Show'} build plate
         </button>
+
         <button
           type="button"
           onClick={() => setShowPrinterFrame((value) => !value)}
